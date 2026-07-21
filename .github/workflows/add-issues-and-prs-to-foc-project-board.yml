@@ -1,0 +1,22 @@
+name: Add issues and PRs to FOC project board
+
+on:
+  issues:
+    types:
+      - opened
+  # Use pull_request_target so pull requests from forks can access the secret.
+  # This workflow does not check out or execute code from the pull request.
+  pull_request_target:
+    types:
+      - opened
+
+jobs:
+  add-to-project:
+    name: Add new issues and PRs to the FOC project
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd # v2.0.0
+        with:
+          project-url: https://github.com/orgs/filecoin-project/projects/143
+          github-token: ${{ secrets.FILOZZY_CI_ADD_TO_PROJECT }}
