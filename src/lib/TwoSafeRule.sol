@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
-import {Epoch, currentEpoch} from "./lib/Epoch.sol";
-import {AddressXorSet} from "./lib/AddressXorSet.sol";
-import {PendingTask, PendingTaskInfo, PendingTaskLibrary} from "./lib/PendingTask.sol";
-import {OwnersLibrary} from "./lib/Owners.sol";
+import {Epoch, currentEpoch} from "./Epoch.sol";
+import {AddressXorSet} from "./AddressXorSet.sol";
+import {PendingTask, PendingTaskInfo, PendingTaskLibrary} from "./PendingTask.sol";
+import {OwnersLibrary} from "./Owners.sol";
 
 contract TwoSafeRuler {
     using OwnersLibrary for address;

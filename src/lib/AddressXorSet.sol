@@ -3,6 +3,8 @@ pragma solidity ^0.8.36;
 
 // XOR sets are storage-efficient, and appropriate for small sets of large random items, such as owner addresses
 
+// TODO compare gas to bloom set
+
 type AddressXorSet is address;
 
 using {equals as ==} for AddressXorSet global;
@@ -76,10 +78,10 @@ library AddressXorSetLibrary {
 
             // find the underlying bitmap by reconstructing the set from its possible items
             uint256 exp = 1 << len;
-            for (uint256 bitmap = 1; bitmap < exp; bitmap++) {
+            for (uint256 bitmap = 0; bitmap < exp; bitmap++) {
                 AddressXorSet calculated = EMPTY_SET;
                 for (uint256 i = 0; i < len; i++) {
-                    if (bitmap >> i == 1) {
+                    if ((bitmap >> i) & 1 == 1) {
                         calculated = add(calculated, possibleItems[i]);
                     }
                 }
@@ -87,7 +89,7 @@ library AddressXorSetLibrary {
                     // found the underlying bitmap for the set
 
                     // does that bitmap contain the item?
-                    return bitmap >> index == 1;
+                    return (bitmap >> index) & 1 == 1;
                 }
             }
             // did not find the underlying bitmap for the set
