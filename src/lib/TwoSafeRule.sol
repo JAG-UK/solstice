@@ -16,6 +16,9 @@ contract TwoSafeRuler {
     event Approved(bytes32 indexed taskId, address indexed owner);
     event Rejected(bytes32 indexed taskId, address indexed owner);
 
+    error HoldUntil(Epoch until);
+    error NotOwner(address account);
+
     modifier unanimous(bytes32 taskId, Epoch hold) {
         // load
         PendingTaskInfo storage taskInfo = PendingTaskLibrary.getTasksSlot()[taskId];
@@ -25,7 +28,7 @@ contract TwoSafeRuler {
         // modify
         if (loaded.approvals == allOwners) {
             // already approved: permissionless completion
-            require(currentEpoch() - loaded.modified >= hold);
+            require(currentEpoch() - loaded.modified >= hold, HoldUntil(loaded.modified + hold));
             // execute
             delete taskInfo.task;
             _;

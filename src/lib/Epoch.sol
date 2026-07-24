@@ -4,6 +4,7 @@ pragma solidity ^0.8.36;
 type Epoch is uint96;
 
 using {
+    add as +,
     sub as -,
     equals as ==,
     greaterThan as >,
@@ -13,13 +14,19 @@ using {
 } for Epoch global;
 
 function currentEpoch() view returns (Epoch epoch) {
-    assembly {
+    assembly ("memory-safe") {
         epoch := number()
     }
 }
 
+function add(Epoch epoch, Epoch other) pure returns (Epoch sum) {
+    assembly ("memory-safe") {
+        sum := add(epoch, other)
+    }
+}
+
 function sub(Epoch epoch, Epoch other) pure returns (Epoch difference) {
-    assembly {
+    assembly ("memory-safe") {
         difference := sub(epoch, other)
     }
 }
