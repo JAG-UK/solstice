@@ -6,13 +6,13 @@ import {Epoch, currentEpoch} from "../src/lib/Epoch.sol";
 import {AddressXorSet, EMPTY_SET} from "../src/lib/AddressXorSet.sol";
 import {PendingTask, PendingTaskLibrary} from "../src/lib/PendingTask.sol";
 import {OwnersLibrary} from "../src/lib/Owners.sol";
-import {TwoSafeRuler} from "../src/lib/TwoSafeRule.sol";
+import {UnanimousGovernance} from "../src/lib/UnanimousGovernance.sol";
 
 // wraps the internal modifier with two administrator actions so vm.expectRevert/vm.expectEmit
 // have a real call frame to target. Mirrors planned usage: each action's hold is a constant
 // baked into its `unanimous` invocation, and the taskId is just keccak256(msg.data), i.e. the
 // method selector plus its parameters.
-contract TwoSafeRuleHarness is TwoSafeRuler {
+contract UnanimousGovernanceHarness is UnanimousGovernance {
     Epoch public constant ADD_OWNER_HOLD = Epoch.wrap(0);
     Epoch public constant REMOVE_OWNER_HOLD = Epoch.wrap(10);
 
@@ -60,8 +60,8 @@ contract TwoSafeRuleHarness is TwoSafeRuler {
     }
 }
 
-contract TwoSafeRuleTest is Test {
-    TwoSafeRuleHarness harness;
+contract UnanimousGovernanceTest is Test {
+    UnanimousGovernanceHarness harness;
 
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
@@ -70,7 +70,7 @@ contract TwoSafeRuleTest is Test {
     address newOwner = makeAddr("newOwner");
 
     function setUp() public {
-        harness = new TwoSafeRuleHarness();
+        harness = new UnanimousGovernanceHarness();
     }
 
     function test_addOwner_singleOwner_executesImmediately() public {
@@ -78,9 +78,9 @@ contract TwoSafeRuleTest is Test {
         bytes32 taskId = harness.addOwnerTaskId(newOwner);
 
         vm.expectEmit(true, false, false, false, address(harness));
-        emit TwoSafeRuler.Submitted(taskId);
+        emit UnanimousGovernance.Submitted(taskId);
         vm.expectEmit(true, true, false, false, address(harness));
-        emit TwoSafeRuler.Approved(taskId, alice);
+        emit UnanimousGovernance.Approved(taskId, alice);
         vm.expectEmit(true, false, false, false, address(harness));
         emit OwnersLibrary.OwnerAdded(newOwner);
 
@@ -96,9 +96,9 @@ contract TwoSafeRuleTest is Test {
         bytes32 taskId = harness.addOwnerTaskId(newOwner);
 
         vm.expectEmit(true, false, false, false, address(harness));
-        emit TwoSafeRuler.Submitted(taskId);
+        emit UnanimousGovernance.Submitted(taskId);
         vm.expectEmit(true, true, false, false, address(harness));
-        emit TwoSafeRuler.Approved(taskId, alice);
+        emit UnanimousGovernance.Approved(taskId, alice);
         vm.prank(alice);
         harness.addOwner(newOwner);
 
@@ -109,7 +109,7 @@ contract TwoSafeRuleTest is Test {
         assertTrue(approvals == EMPTY_SET.add(alice));
 
         vm.expectEmit(true, true, false, false, address(harness));
-        emit TwoSafeRuler.Approved(taskId, bob);
+        emit UnanimousGovernance.Approved(taskId, bob);
         vm.expectEmit(true, false, false, false, address(harness));
         emit OwnersLibrary.OwnerAdded(newOwner);
         vm.prank(bob);
@@ -148,7 +148,7 @@ contract TwoSafeRuleTest is Test {
     function test_addOwner_nonOwner_cannotApprove() public {
         harness.seedOwner(alice);
 
-        vm.expectRevert(abi.encodeWithSelector(TwoSafeRuler.NotOwner.selector, stranger));
+        vm.expectRevert(abi.encodeWithSelector(UnanimousGovernance.NotOwner.selector, stranger));
         vm.prank(stranger);
         harness.addOwner(newOwner);
     }
@@ -175,7 +175,7 @@ contract TwoSafeRuleTest is Test {
 
         // too early: reverts even for an owner
         Epoch until = approvalEpoch + harness.REMOVE_OWNER_HOLD();
-        vm.expectRevert(abi.encodeWithSelector(TwoSafeRuler.HoldUntil.selector, until));
+        vm.expectRevert(abi.encodeWithSelector(UnanimousGovernance.HoldUntil.selector, until));
         vm.prank(alice);
         harness.removeOwner(bob, 1);
 
@@ -216,7 +216,7 @@ contract TwoSafeRuleTest is Test {
         assertTrue(approvals == EMPTY_SET.add(alice).add(bob));
 
         vm.expectEmit(true, true, false, false, address(harness));
-        emit TwoSafeRuler.Rejected(taskId, alice);
+        emit UnanimousGovernance.Rejected(taskId, alice);
         vm.prank(alice);
         harness.vetoRemoveOwner(bob, 1);
 
@@ -230,7 +230,7 @@ contract TwoSafeRuleTest is Test {
         vm.roll(Epoch.unwrap(currentEpoch() + harness.REMOVE_OWNER_HOLD()));
 
         vm.expectEmit(true, false, false, false, address(harness));
-        emit TwoSafeRuler.Submitted(taskId);
+        emit UnanimousGovernance.Submitted(taskId);
         vm.prank(alice);
         harness.removeOwner(bob, 1);
 
@@ -252,7 +252,7 @@ contract TwoSafeRuleTest is Test {
         assertTrue(approvals == EMPTY_SET.add(alice));
 
         vm.expectEmit(true, true, false, false, address(harness));
-        emit TwoSafeRuler.Rejected(taskId, bob);
+        emit UnanimousGovernance.Rejected(taskId, bob);
         vm.prank(bob);
         harness.vetoAddOwner(newOwner);
 
@@ -262,7 +262,7 @@ contract TwoSafeRuleTest is Test {
 
         // the task was cleared: a fresh Submitted event fires on the next approval
         vm.expectEmit(true, false, false, false, address(harness));
-        emit TwoSafeRuler.Submitted(taskId);
+        emit UnanimousGovernance.Submitted(taskId);
         vm.prank(alice);
         harness.addOwner(newOwner);
 
@@ -279,7 +279,7 @@ contract TwoSafeRuleTest is Test {
         vm.prank(alice);
         harness.addOwner(newOwner);
 
-        vm.expectRevert(abi.encodeWithSelector(TwoSafeRuler.NotOwner.selector, stranger));
+        vm.expectRevert(abi.encodeWithSelector(UnanimousGovernance.NotOwner.selector, stranger));
         vm.prank(stranger);
         harness.vetoAddOwner(newOwner);
     }
@@ -292,7 +292,7 @@ contract TwoSafeRuleTest is Test {
 
         // alice approves, then approves again before the others: the xor-set
         // approval accounting cancels her first approval out (see the NOTE
-        // in TwoSafeRule.sol acknowledging this is not guarded against)
+        // in UnanimousGovernance.sol acknowledging this is not guarded against)
         vm.prank(alice);
         harness.addOwner(newOwner);
         vm.prank(alice);

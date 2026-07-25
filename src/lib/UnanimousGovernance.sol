@@ -6,7 +6,7 @@ import {AddressXorSet} from "./AddressXorSet.sol";
 import {PendingTask, PendingTaskInfo, PendingTaskLibrary} from "./PendingTask.sol";
 import {OwnersLibrary} from "./Owners.sol";
 
-contract TwoSafeRuler {
+contract UnanimousGovernance {
     using OwnersLibrary for address;
 
     Epoch constant NO_HOLD = Epoch.wrap(0);
