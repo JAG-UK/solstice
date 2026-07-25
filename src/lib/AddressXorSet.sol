@@ -3,7 +3,10 @@ pragma solidity ^0.8.36;
 
 // XOR sets are storage-efficient, and appropriate for small sets of large random items, such as owner addresses
 
-// TODO compare gas to bloom set
+// Compared to a Bloom-filter-based set: Bloom's addOwner only wins past ~3 owners,
+// but removeOwner is always worse (O(n) recompute vs XOR's O(1) self-inverse remove).
+// Bloom also requires each owner to set an exclusive bit that no other owner shares,
+// a probabilistic invariant that can spuriously reject a legitimate new owner.
 
 type AddressXorSet is address;
 
