@@ -28,6 +28,9 @@ library OwnersLibrary {
         }
     }
 
+    event OwnerAdded(address indexed owner);
+    event OwnerRemoved(address indexed owner);
+
     function isOwner(address someone) internal view returns (bool) {
         return getOwnersSlot().ownerInfo[someone].flags & IS_OWNER_MASK != 0;
     }
@@ -64,6 +67,8 @@ library OwnersLibrary {
         owners.ownersRoster.push(owner);
         owners.allOwners = allOwners.add(owner);
         owners.ownerInfo[owner].flags |= IS_OWNER_MASK;
+
+        emit OwnerAdded(owner);
     }
 
     // Roster index does not match the supplied owner address
@@ -85,5 +90,7 @@ library OwnersLibrary {
             owners.ownersRoster[ownersRosterIndex] = owners.ownersRoster[lastRosterIndex];
         }
         owners.ownersRoster.pop();
+
+        emit OwnerRemoved(owner);
     }
 }

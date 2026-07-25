@@ -38,7 +38,7 @@ contract TwoSafeRuler {
             if (loaded.modified == NEVER) {
                 emit Submitted(taskId);
             } else {
-                // NOTE we can just assume they won't do this
+                // NOTE we can just assume they won't do this:
                 // require(!loaded.approvals.contains(msg.sender, OwnersLibrary.loadOwnersRoster()), AlreadyApproved());
             }
             loaded.modified = currentEpoch();
@@ -62,7 +62,7 @@ contract TwoSafeRuler {
         PendingTaskInfo storage taskInfo = PendingTaskLibrary.getTasksSlot()[taskId];
 
         // modify
-        require(msg.sender.isOwner());
+        require(msg.sender.isOwner(), NotOwner(msg.sender));
         delete taskInfo.task;
 
         emit Rejected(taskId, msg.sender);
