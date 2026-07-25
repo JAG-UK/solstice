@@ -59,17 +59,22 @@ library OwnersLibrary {
         require(!isOwner(owner), AlreadyOwner(owner));
 
         // also verify that no xor combination of existing owners is equal to this one
-        owners.ownersRoster.push(owner);
-        require(!allOwners.contains(owner, loadOwnerRoster()), InvalidOwner(owner));
+        require(!AddressXorSetLibrary.negatesSubset(owner, loadOwnerRoster()), InvalidOwner(owner));
 
+        owners.ownersRoster.push(owner);
         owners.allOwners = allOwners.add(owner);
         owners.ownerInfo[owner].flags |= IS_OWNER_MASK;
     }
 
+    // Roster index does not match the supplied owner address
+    error OwnerIndexMismatch(address actual);
+
     function removeOwner(address owner, uint256 ownersRosterIndex) internal {
         Owners storage owners = getOwnersSlot();
 
-        require(owners.ownersRoster[ownersRosterIndex] == owner);
+        require(
+            owners.ownersRoster[ownersRosterIndex] == owner, OwnerIndexMismatch(owners.ownersRoster[ownersRosterIndex])
+        );
 
         owners.allOwners = owners.allOwners.remove(owner);
         delete owners.ownerInfo[owner];

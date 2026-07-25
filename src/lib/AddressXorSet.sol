@@ -54,46 +54,26 @@ library AddressXorSetLibrary {
         }
     }
 
-    // The address is not in the possibleItems
-    error ImpossibleAddress(address item);
-    // The set cannot be created from the possibleItems
-    error ImpossibleAddressSet(AddressXorSet set);
-
-    // @dev The execution cost is exponential in the number of possible items.
-    // @param set The set to check
-    // @param item The address to check for membership; must be present in possibleItems
-    // @param possibleItems The full universe of addresses that may have been combined into the set
-    // @return Whether the set contains the item
-    function contains(AddressXorSet set, address item, address[] memory possibleItems) internal pure returns (bool) {
+    // @dev The execution cost is exponential in the number of basis items.
+    // @param item The address to check
+    // @param basis The addresses whose xor-combinations are checked against item
+    // @return Whether some subset of basis xors to exactly item
+    function negatesSubset(address item, address[] memory basis) internal pure returns (bool) {
         unchecked {
-            uint256 len = possibleItems.length;
-            uint256 index = len;
-            for (uint256 i = 0; i < len; i++) {
-                if (possibleItems[i] == item) {
-                    index = i;
-                    break;
-                }
-            }
-            require(index < len, ImpossibleAddress(item));
-
-            // find the underlying bitmap by reconstructing the set from its possible items
+            uint256 len = basis.length;
             uint256 exp = 1 << len;
             for (uint256 bitmap = 0; bitmap < exp; bitmap++) {
                 AddressXorSet calculated = EMPTY_SET;
                 for (uint256 i = 0; i < len; i++) {
                     if ((bitmap >> i) & 1 == 1) {
-                        calculated = add(calculated, possibleItems[i]);
+                        calculated = add(calculated, basis[i]);
                     }
                 }
-                if (calculated == set) {
-                    // found the underlying bitmap for the set
-
-                    // does that bitmap contain the item?
-                    return (bitmap >> index) & 1 == 1;
+                if (AddressXorSet.unwrap(calculated) == item) {
+                    return true;
                 }
             }
-            // did not find the underlying bitmap for the set
-            revert ImpossibleAddressSet(set);
+            return false;
         }
     }
 }
