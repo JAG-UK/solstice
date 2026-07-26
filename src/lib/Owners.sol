@@ -31,14 +31,9 @@ library OwnersLibrary {
         return getOwnersSlot().ownerInfo[someone].ownerBit != 0;
     }
 
+    /// @dev Returns EMPTY_SET if `owner` is not a current owner.
     function asOwnerSet(address owner) internal view returns (OwnerSet mask) {
         uint8 ownerBit = getOwnersSlot().ownerInfo[owner].ownerBit;
-        assembly ("memory-safe") {
-            mask := shl(sub(ownerBit, 1), 1)
-        }
-    }
-
-    function asOwnerSet(uint8 ownerBit) internal pure returns (OwnerSet mask) {
         assembly ("memory-safe") {
             mask := shl(sub(ownerBit, 1), 1)
         }
@@ -87,6 +82,8 @@ library OwnersLibrary {
     // Address to remove is not a current owner
     error NotOwner(address owner);
 
+    /// @dev A removed owner's bit may be recycled to a future owner by addOwner.
+    /// @dev Veto stale PendingTasks when removing an owner to avoid approvals carrying over.
     function removeOwner(address owner) internal {
         require(isOwner(owner), NotOwner(owner));
 
