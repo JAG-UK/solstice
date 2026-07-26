@@ -29,9 +29,9 @@ contract OwnersHarness {
 
     // test-only bootstrap: jumps the bit-scan cursor and bitmap directly, so tests can exercise
     // addOwner's wraparound without registering ~160 real owners first
-    function seedBitState(uint8 latestOwnerBit, OwnerSet allOwners) external {
+    function seedBitState(uint8 nextBitCursor, OwnerSet allOwners) external {
         OwnersLibrary.Owners storage owners = OwnersLibrary.getOwnersSlot();
-        owners.latestOwnerBit = latestOwnerBit;
+        owners.nextBitCursor = nextBitCursor;
         owners.allOwners = allOwners;
     }
 }
@@ -140,7 +140,7 @@ contract OwnersTest is Test {
     }
 
     // loop-around coverage:
-    // addOwner scans forward from `latestOwnerBit` for a free bit, wrapping the
+    // addOwner scans forward from `nextBitCursor` for a free bit, wrapping the
     // scan back to bit 0 (via `ownerBit %= 160`) once it runs past bit 159, the
     // top of the uint160 bitmap. These tests seed that boundary condition
     // directly instead of registering ~160 real owners to reach it.

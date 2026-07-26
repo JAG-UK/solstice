@@ -37,14 +37,14 @@ contract UnanimousGovernance {
         } else {
             // approve
             require(msg.sender.isOwner(), NotOwner(msg.sender));
-            OwnerSet sig = msg.sender.asOwnerSet();
+            OwnerSet ownerBit = msg.sender.asOwnerSet();
             if (loaded.modified == UNSUBMITTED) {
                 emit Submitted(taskId);
             } else {
-                require(loaded.approvals & sig == EMPTY_SET, AlreadyApproved());
+                require(loaded.approvals & ownerBit == EMPTY_SET, AlreadyApproved());
             }
             loaded.modified = currentEpoch();
-            loaded.approvals = loaded.approvals | sig;
+            loaded.approvals = loaded.approvals | ownerBit;
 
             // store result
             emit Approved(taskId, msg.sender);
