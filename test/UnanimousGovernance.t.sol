@@ -3,7 +3,7 @@ pragma solidity ^0.8.36;
 
 import {Test} from "forge-std/Test.sol";
 import {Epoch, currentEpoch} from "../src/lib/Epoch.sol";
-import {AddressXorSet, EMPTY_SET} from "../src/lib/AddressXorSet.sol";
+import {EMPTY_SET, OwnerSet} from "../src/lib/OwnerSet.sol";
 import {PendingTask, PendingTaskLibrary} from "../src/lib/PendingTask.sol";
 import {OwnersLibrary} from "../src/lib/Owners.sol";
 import {UnanimousGovernance} from "../src/lib/UnanimousGovernance.sol";
@@ -25,9 +25,13 @@ contract UnanimousGovernanceHarness is UnanimousGovernance {
         return OwnersLibrary.isOwner(someone);
     }
 
+    function asOwnerSet(address owner) external view returns (OwnerSet) {
+        return OwnersLibrary.asOwnerSet(owner);
+    }
+
     // exposes raw pending-task state so tests can assert on it directly,
     // rather than only inferring it from events or final owner-set membership
-    function getPendingTask(bytes32 taskId) external view returns (Epoch modified, AddressXorSet approvals) {
+    function getPendingTask(bytes32 taskId) external view returns (Epoch modified, OwnerSet approvals) {
         PendingTask memory task = PendingTaskLibrary.getTasksSlot()[taskId].task;
         return (task.modified, task.approvals);
     }
@@ -36,27 +40,24 @@ contract UnanimousGovernanceHarness is UnanimousGovernance {
         return keccak256(abi.encodeWithSelector(this.addOwner.selector, owner));
     }
 
-    function removeOwnerTaskId(address owner, uint256 ownersRosterIndex) public pure returns (bytes32) {
-        return keccak256(abi.encodeWithSelector(this.removeOwner.selector, owner, ownersRosterIndex));
+    function removeOwnerTaskId(address owner) public pure returns (bytes32) {
+        return keccak256(abi.encodeWithSelector(this.removeOwner.selector, owner));
     }
 
     function addOwner(address owner) external unanimous(keccak256(msg.data), ADD_OWNER_HOLD) {
         OwnersLibrary.addOwner(owner);
     }
 
-    function removeOwner(address owner, uint256 ownersRosterIndex)
-        external
-        unanimous(keccak256(msg.data), REMOVE_OWNER_HOLD)
-    {
-        OwnersLibrary.removeOwner(owner, ownersRosterIndex);
+    function removeOwner(address owner) external unanimous(keccak256(msg.data), REMOVE_OWNER_HOLD) {
+        OwnersLibrary.removeOwner(owner);
     }
 
     function vetoAddOwner(address owner) external {
         _veto(addOwnerTaskId(owner));
     }
 
-    function vetoRemoveOwner(address owner, uint256 ownersRosterIndex) external {
-        _veto(removeOwnerTaskId(owner, ownersRosterIndex));
+    function vetoRemoveOwner(address owner) external {
+        _veto(removeOwnerTaskId(owner));
     }
 }
 
@@ -104,9 +105,9 @@ contract UnanimousGovernanceTest is Test {
 
         // only one of two owners has approved: not yet executed
         assertFalse(harness.isOwner(newOwner));
-        (Epoch modified, AddressXorSet approvals) = harness.getPendingTask(taskId);
+        (Epoch modified, OwnerSet approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == currentEpoch());
-        assertTrue(approvals == EMPTY_SET.add(alice));
+        assertTrue(approvals == harness.asOwnerSet(alice));
 
         vm.expectEmit(true, true, false, false, address(harness));
         emit UnanimousGovernance.Approved(taskId, bob);
@@ -133,9 +134,9 @@ contract UnanimousGovernanceTest is Test {
         vm.prank(bob);
         harness.addOwner(newOwner);
         assertFalse(harness.isOwner(newOwner));
-        (Epoch modified, AddressXorSet approvals) = harness.getPendingTask(taskId);
+        (Epoch modified, OwnerSet approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == currentEpoch());
-        assertTrue(approvals == EMPTY_SET.add(alice).add(bob));
+        assertTrue(approvals == (harness.asOwnerSet(alice) | harness.asOwnerSet(bob)));
 
         vm.prank(carol);
         harness.addOwner(newOwner);
@@ -156,33 +157,33 @@ contract UnanimousGovernanceTest is Test {
     function test_removeOwner_withHold_delaysExecutionUntilPermissionlessFinalize() public {
         harness.seedOwner(alice);
         harness.seedOwner(bob);
-        bytes32 taskId = harness.removeOwnerTaskId(bob, 1);
+        bytes32 taskId = harness.removeOwnerTaskId(bob);
 
         // unanimous requires every current owner to approve, including the
         // one being removed, so bob must approve his own removal
         vm.prank(alice);
-        harness.removeOwner(bob, 1);
+        harness.removeOwner(bob);
 
         Epoch approvalEpoch = currentEpoch();
         vm.prank(bob);
-        harness.removeOwner(bob, 1);
+        harness.removeOwner(bob);
 
         // both owners approved, but the hold delays execution
         assertTrue(harness.isOwner(bob));
-        (Epoch modified, AddressXorSet approvals) = harness.getPendingTask(taskId);
+        (Epoch modified, OwnerSet approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == approvalEpoch);
-        assertTrue(approvals == EMPTY_SET.add(alice).add(bob));
+        assertTrue(approvals == (harness.asOwnerSet(alice) | harness.asOwnerSet(bob)));
 
         // too early: reverts even for an owner
         Epoch until = approvalEpoch + harness.REMOVE_OWNER_HOLD();
         vm.expectRevert(abi.encodeWithSelector(UnanimousGovernance.HoldUntil.selector, until));
         vm.prank(alice);
-        harness.removeOwner(bob, 1);
+        harness.removeOwner(bob);
 
         // the revert left the pending task untouched
         (modified, approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == approvalEpoch);
-        assertTrue(approvals == EMPTY_SET.add(alice).add(bob));
+        assertTrue(approvals == (harness.asOwnerSet(alice) | harness.asOwnerSet(bob)));
 
         vm.roll(Epoch.unwrap(approvalEpoch + harness.REMOVE_OWNER_HOLD()));
 
@@ -190,7 +191,7 @@ contract UnanimousGovernanceTest is Test {
         vm.expectEmit(true, false, false, false, address(harness));
         emit OwnersLibrary.OwnerRemoved(bob);
         vm.prank(stranger);
-        harness.removeOwner(bob, 1);
+        harness.removeOwner(bob);
 
         assertFalse(harness.isOwner(bob));
         (modified, approvals) = harness.getPendingTask(taskId);
@@ -201,24 +202,24 @@ contract UnanimousGovernanceTest is Test {
     function test_veto_duringHoldingPeriod_cancelsBeforeFinalize() public {
         harness.seedOwner(alice);
         harness.seedOwner(bob);
-        bytes32 taskId = harness.removeOwnerTaskId(bob, 1);
+        bytes32 taskId = harness.removeOwnerTaskId(bob);
 
         vm.prank(alice);
-        harness.removeOwner(bob, 1);
+        harness.removeOwner(bob);
         Epoch approvalEpoch = currentEpoch();
         vm.prank(bob);
-        harness.removeOwner(bob, 1);
+        harness.removeOwner(bob);
 
         // fully approved, but still within the hold: veto is still possible
         assertTrue(harness.isOwner(bob));
-        (Epoch modified, AddressXorSet approvals) = harness.getPendingTask(taskId);
+        (Epoch modified, OwnerSet approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == approvalEpoch);
-        assertTrue(approvals == EMPTY_SET.add(alice).add(bob));
+        assertTrue(approvals == (harness.asOwnerSet(alice) | harness.asOwnerSet(bob)));
 
         vm.expectEmit(true, true, false, false, address(harness));
         emit UnanimousGovernance.Rejected(taskId, alice);
         vm.prank(alice);
-        harness.vetoRemoveOwner(bob, 1);
+        harness.vetoRemoveOwner(bob);
 
         assertTrue(harness.isOwner(bob));
         (modified, approvals) = harness.getPendingTask(taskId);
@@ -232,12 +233,12 @@ contract UnanimousGovernanceTest is Test {
         vm.expectEmit(true, false, false, false, address(harness));
         emit UnanimousGovernance.Submitted(taskId);
         vm.prank(alice);
-        harness.removeOwner(bob, 1);
+        harness.removeOwner(bob);
 
         assertTrue(harness.isOwner(bob));
         (modified, approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == currentEpoch());
-        assertTrue(approvals == EMPTY_SET.add(alice));
+        assertTrue(approvals == harness.asOwnerSet(alice));
     }
 
     function test_veto_resetsPendingTask() public {
@@ -247,9 +248,9 @@ contract UnanimousGovernanceTest is Test {
 
         vm.prank(alice);
         harness.addOwner(newOwner);
-        (Epoch modified, AddressXorSet approvals) = harness.getPendingTask(taskId);
+        (Epoch modified, OwnerSet approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == currentEpoch());
-        assertTrue(approvals == EMPTY_SET.add(alice));
+        assertTrue(approvals == harness.asOwnerSet(alice));
 
         vm.expectEmit(true, true, false, false, address(harness));
         emit UnanimousGovernance.Rejected(taskId, bob);
@@ -269,7 +270,7 @@ contract UnanimousGovernanceTest is Test {
         assertFalse(harness.isOwner(newOwner));
         (modified, approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == currentEpoch());
-        assertTrue(approvals == EMPTY_SET.add(alice));
+        assertTrue(approvals == harness.asOwnerSet(alice));
     }
 
     function test_veto_onlyOwnerCanVeto() public {
@@ -284,36 +285,31 @@ contract UnanimousGovernanceTest is Test {
         harness.vetoAddOwner(newOwner);
     }
 
-    function test_doubleApproval_byOwner_cancelsPreviousApproval() public {
+    function test_doubleApproval_byOwner_reverts() public {
         harness.seedOwner(alice);
         harness.seedOwner(bob);
         harness.seedOwner(carol);
+
+        // alice approves, then tries to approve again before the others have
+        // weighed in: the bitmask approval accounting now rejects this outright,
+        // instead of silently xor-cancelling her first approval
+        vm.prank(alice);
+        harness.addOwner(newOwner);
+
+        vm.expectRevert(UnanimousGovernance.AlreadyApproved.selector);
+        vm.prank(alice);
+        harness.addOwner(newOwner);
+
         bytes32 taskId = harness.addOwnerTaskId(newOwner);
-
-        // alice approves, then approves again before the others: the xor-set
-        // approval accounting cancels her first approval out (see the NOTE
-        // in UnanimousGovernance.sol acknowledging this is not guarded against)
-        vm.prank(alice);
-        harness.addOwner(newOwner);
-        vm.prank(alice);
-        harness.addOwner(newOwner);
-
-        (Epoch modified, AddressXorSet approvals) = harness.getPendingTask(taskId);
+        (Epoch modified, OwnerSet approvals) = harness.getPendingTask(taskId);
         assertTrue(modified == currentEpoch());
-        assertTrue(approvals == EMPTY_SET);
+        assertTrue(approvals == harness.asOwnerSet(alice));
 
+        // the revert didn't consume or corrupt the pending approval: bob and
+        // carol can still approve and execute normally
         vm.prank(bob);
         harness.addOwner(newOwner);
         vm.prank(carol);
-        harness.addOwner(newOwner);
-
-        // alice's approval was cancelled out, so only bob and carol are
-        // recorded: the task is not yet fully approved
-        assertFalse(harness.isOwner(newOwner));
-        (modified, approvals) = harness.getPendingTask(taskId);
-        assertTrue(approvals == EMPTY_SET.add(bob).add(carol));
-
-        vm.prank(alice);
         harness.addOwner(newOwner);
 
         assertTrue(harness.isOwner(newOwner));

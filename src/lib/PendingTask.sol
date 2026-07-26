@@ -2,11 +2,11 @@
 pragma solidity ^0.8.36;
 
 import {Epoch} from "./Epoch.sol";
-import {AddressXorSet} from "./AddressXorSet.sol";
+import {OwnerSet} from "./OwnerSet.sol";
 
 struct PendingTask {
     Epoch modified;
-    AddressXorSet approvals;
+    OwnerSet approvals;
 }
 
 struct PendingTaskInfo {

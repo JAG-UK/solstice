@@ -1,22 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
-import {AddressXorSet, AddressXorSetLibrary} from "./AddressXorSet.sol";
+import {EMPTY_SET, FULL_SET, OwnerSet} from "./OwnerSet.sol";
 
 library OwnersLibrary {
-    using AddressXorSetLibrary for AddressXorSet;
-
-    uint256 private constant IS_OWNER_MASK = 1;
-
     struct OwnerInfo {
-        uint256 flags;
+        uint8 ownerBit; // [0, 160]
     }
 
     /// @custom:storage-location erc7201:Solstice.Owners
     struct Owners {
         mapping(address => OwnerInfo) ownerInfo;
-        AddressXorSet allOwners;
-        address[] ownersRoster;
+        uint8 latestOwnerBit; // [0, 160)
+        OwnerSet allOwners;
     }
 
     // keccak256(abi.encode(uint256(keccak256("Solstice.Owners")) - 1)) & ~bytes32(uint256(0xff));
@@ -32,64 +28,72 @@ library OwnersLibrary {
     event OwnerRemoved(address indexed owner);
 
     function isOwner(address someone) internal view returns (bool) {
-        return getOwnersSlot().ownerInfo[someone].flags & IS_OWNER_MASK != 0;
+        return getOwnersSlot().ownerInfo[someone].ownerBit != 0;
     }
 
-    function getAllOwners() internal view returns (AddressXorSet) {
-        return getOwnersSlot().allOwners;
-    }
-
-    function loadOwnerRoster() internal view returns (address[] memory ownersRoster) {
-        Owners storage owners = getOwnersSlot();
-        unchecked {
-            uint256 len = owners.ownersRoster.length;
-            ownersRoster = new address[](owners.ownersRoster.length);
-            for (uint256 i = 0; i < len; i++) {
-                ownersRoster[i] = owners.ownersRoster[i];
-            }
+    function asOwnerSet(address owner) internal view returns (OwnerSet mask) {
+        uint8 ownerBit = getOwnersSlot().ownerInfo[owner].ownerBit;
+        assembly ("memory-safe") {
+            mask := shl(sub(ownerBit, 1), 1)
         }
+    }
+
+    function asOwnerSet(uint8 ownerBit) internal pure returns (OwnerSet mask) {
+        assembly ("memory-safe") {
+            mask := shl(sub(ownerBit, 1), 1)
+        }
+    }
+
+    function getAllOwners() internal view returns (OwnerSet) {
+        return getOwnersSlot().allOwners;
     }
 
     // Proposed owner is already an owner
     error AlreadyOwner(address owner);
-    // Proposed owner is a combination of existing owners
-    error InvalidOwner(address owner);
+    // Unsupported ownership count (> 160)
+    error MaximumOwnersReached();
 
     function addOwner(address owner) internal {
-        Owners storage owners = getOwnersSlot();
-        AddressXorSet allOwners = owners.allOwners;
-
         require(!isOwner(owner), AlreadyOwner(owner));
 
-        // also verify that no xor combination of existing owners is equal to this one
-        require(!AddressXorSetLibrary.negatesSubset(owner, loadOwnerRoster()), InvalidOwner(owner));
+        Owners storage owners = getOwnersSlot();
+        uint8 ownerBit = owners.latestOwnerBit;
+        OwnerSet allOwners = owners.allOwners;
 
-        owners.ownersRoster.push(owner);
-        owners.allOwners = allOwners.add(owner);
-        owners.ownerInfo[owner].flags |= IS_OWNER_MASK;
+        require(allOwners != FULL_SET, MaximumOwnersReached());
+
+        OwnerSet ownerSet = EMPTY_SET;
+
+        // assign next free bit
+        while (true) {
+            assembly ("memory-safe") {
+                ownerSet := shl(ownerBit, 1)
+                ownerBit := add(1, ownerBit)
+            }
+            if (ownerSet & allOwners == EMPTY_SET) {
+                break;
+            } else {
+                ownerBit %= 160;
+            }
+        }
+
+        owners.ownerInfo[owner].ownerBit = ownerBit;
+        owners.allOwners = allOwners | ownerSet;
+        owners.latestOwnerBit = ownerBit % 160;
 
         emit OwnerAdded(owner);
     }
 
-    // Roster index does not match the supplied owner address
-    error OwnerIndexMismatch(address actual);
+    // Address to remove is not a current owner
+    error NotOwner(address owner);
 
-    function removeOwner(address owner, uint256 ownersRosterIndex) internal {
+    function removeOwner(address owner) internal {
+        require(isOwner(owner), NotOwner(owner));
+
         Owners storage owners = getOwnersSlot();
-
-        require(
-            owners.ownersRoster[ownersRosterIndex] == owner, OwnerIndexMismatch(owners.ownersRoster[ownersRosterIndex])
-        );
-
-        owners.allOwners = owners.allOwners.remove(owner);
+        OwnerSet mask = asOwnerSet(owner);
+        owners.allOwners = owners.allOwners ^ mask;
         delete owners.ownerInfo[owner];
-
-        // delete from roster
-        uint256 lastRosterIndex = owners.ownersRoster.length - 1;
-        if (ownersRosterIndex != lastRosterIndex) {
-            owners.ownersRoster[ownersRosterIndex] = owners.ownersRoster[lastRosterIndex];
-        }
-        owners.ownersRoster.pop();
 
         emit OwnerRemoved(owner);
     }

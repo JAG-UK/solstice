@@ -2,7 +2,7 @@
 pragma solidity ^0.8.36;
 
 import {Epoch, currentEpoch} from "./Epoch.sol";
-import {AddressXorSet} from "./AddressXorSet.sol";
+import {EMPTY_SET, OwnerSet} from "./OwnerSet.sol";
 import {PendingTask, PendingTaskInfo, PendingTaskLibrary} from "./PendingTask.sol";
 import {OwnersLibrary} from "./Owners.sol";
 
@@ -18,15 +18,16 @@ contract UnanimousGovernance {
 
     error HoldUntil(Epoch until);
     error NotOwner(address account);
+    error AlreadyApproved();
 
     modifier unanimous(bytes32 taskId, Epoch hold) {
         // load
         PendingTaskInfo storage taskInfo = PendingTaskLibrary.getTasksSlot()[taskId];
         PendingTask memory loaded = taskInfo.task;
-        AddressXorSet allOwners = OwnersLibrary.getAllOwners();
+        OwnerSet allOwners = OwnersLibrary.getAllOwners();
 
         // modify
-        if (loaded.approvals == allOwners) {
+        if (loaded.approvals & allOwners == allOwners) {
             // already approved: permissionless completion
             require(currentEpoch() - loaded.modified >= hold, HoldUntil(loaded.modified + hold));
             // execute
@@ -35,18 +36,18 @@ contract UnanimousGovernance {
         } else {
             // approve
             require(msg.sender.isOwner(), NotOwner(msg.sender));
+            OwnerSet sig = msg.sender.asOwnerSet();
             if (loaded.modified == NEVER) {
                 emit Submitted(taskId);
             } else {
-                // NOTE we can just assume they won't do this:
-                // require(!loaded.approvals.contains(msg.sender, OwnersLibrary.loadOwnersRoster()), AlreadyApproved());
+                require(loaded.approvals & sig == EMPTY_SET, AlreadyApproved());
             }
             loaded.modified = currentEpoch();
-            loaded.approvals = loaded.approvals.add(msg.sender);
+            loaded.approvals = loaded.approvals | sig;
 
             // store result
             emit Approved(taskId, msg.sender);
-            if (hold == NO_HOLD && loaded.approvals == allOwners) {
+            if (hold == NO_HOLD && loaded.approvals & allOwners == allOwners) {
                 delete taskInfo.task;
                 // execute now
                 _;
