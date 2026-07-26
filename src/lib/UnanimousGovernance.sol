@@ -10,7 +10,7 @@ contract UnanimousGovernance {
     using OwnersLibrary for address;
 
     Epoch constant NO_HOLD = Epoch.wrap(0);
-    Epoch constant NEVER = Epoch.wrap(0);
+    Epoch constant UNSUBMITTED = Epoch.wrap(0);
 
     event Submitted(bytes32 indexed taskId);
     event Approved(bytes32 indexed taskId, address indexed owner);
@@ -29,7 +29,8 @@ contract UnanimousGovernance {
         // modify
         if (loaded.approvals & allOwners == allOwners) {
             // already approved: permissionless completion
-            require(currentEpoch() - loaded.modified >= hold, HoldUntil(loaded.modified + hold));
+            Epoch until = loaded.modified + hold;
+            require(currentEpoch() >= until, HoldUntil(until));
             // execute
             delete taskInfo.task;
             _;
@@ -37,7 +38,7 @@ contract UnanimousGovernance {
             // approve
             require(msg.sender.isOwner(), NotOwner(msg.sender));
             OwnerSet sig = msg.sender.asOwnerSet();
-            if (loaded.modified == NEVER) {
+            if (loaded.modified == UNSUBMITTED) {
                 emit Submitted(taskId);
             } else {
                 require(loaded.approvals & sig == EMPTY_SET, AlreadyApproved());
