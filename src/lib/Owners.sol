@@ -48,6 +48,7 @@ library OwnersLibrary {
     // Unsupported ownership count (> 160)
     error MaximumOwnersReached();
 
+    /// @param owner The address to grant ownership to
     function addOwner(address owner) internal {
         require(!isOwner(owner), AlreadyOwner(owner));
 
@@ -82,6 +83,7 @@ library OwnersLibrary {
     // Address to remove is not a current owner
     error NotOwner(address owner);
 
+    /// @param owner The address to revoke ownership from
     /// @dev A removed owner's bit may be recycled to a future owner by addOwner.
     /// @dev Veto stale PendingTasks when removing an owner to avoid approvals carrying over.
     function removeOwner(address owner) internal {

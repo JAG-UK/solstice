@@ -13,6 +13,7 @@ using {
     lessThanOrEqualTo as <=
 } for Epoch global;
 
+/// @return epoch The current block number
 function currentEpoch() view returns (Epoch epoch) {
     assembly ("memory-safe") {
         epoch := number()

@@ -20,6 +20,11 @@ contract UnanimousGovernance {
     error NotOwner(address account);
     error AlreadyApproved();
 
+    /// @notice Executes the wrapped function once every current owner has approved `taskId`.
+    /// @dev If `hold` is zero, execution happens on the approval that reaches unanimity.
+    /// @dev Otherwise, once unanimous, execution becomes permissionless after `hold` epochs elapse.
+    /// @param taskId The identifier of the task being approved
+    /// @param hold The number of epochs to wait after unanimity before execution becomes permissionless
     modifier unanimous(bytes32 taskId, Epoch hold) {
         // load
         PendingTaskInfo storage taskInfo = PendingTaskLibrary.getTasksSlot()[taskId];
@@ -59,6 +64,7 @@ contract UnanimousGovernance {
         }
     }
 
+    /// @param taskId The identifier of the pending task to reject
     function _veto(bytes32 taskId) internal {
         // load
         PendingTaskInfo storage taskInfo = PendingTaskLibrary.getTasksSlot()[taskId];
