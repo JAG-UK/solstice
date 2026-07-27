@@ -19,6 +19,10 @@ jobs:
           version: v1.7.1
           cache: true
 
+      - name: Install Dependencies
+        run: |
+          forge install
+
       - name: fmt
         run: |
           forge fmt --check
