@@ -23,7 +23,7 @@ contract UnanimousGovernance {
     /// @notice Executes the wrapped function once every current owner has approved `taskId`.
     /// @dev If `hold` is zero, execution happens on the approval that reaches unanimity.
     /// @dev Otherwise, once unanimous, execution becomes permissionless after `hold` epochs elapse.
-    /// @param taskId The identifier of the task being approved
+    /// @param taskId The identifier of the task being approved, usually keccak256(msg.data)
     /// @param hold The number of epochs to wait after unanimity before execution becomes permissionless
     modifier unanimous(bytes32 taskId, Epoch hold) {
         // load
