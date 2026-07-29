@@ -14,6 +14,7 @@ bytecode_hash = "none"
 # For dependencies
 remappings = [
     'forge-std/=lib/forge-std/src/',
+    '@safe/=lib/safe-smart-account/contracts/',
     #'@fvm-solidity/=lib/pdp/lib/fvm-solidity/src/',
 ]
 
