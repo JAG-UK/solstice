@@ -82,6 +82,7 @@ library OwnersLibrary {
 
     // Address to remove is not a current owner
     error NotOwner(address owner);
+    error CannotRemoveLastOwner();
 
     /// @param owner The address to revoke ownership from
     /// @dev A removed owner's bit may be recycled to a future owner by addOwner.
@@ -91,7 +92,12 @@ library OwnersLibrary {
 
         Owners storage owners = getOwnersSlot();
         OwnerSet mask = asOwnerSet(owner);
-        owners.allOwners = owners.allOwners ^ mask;
+
+        OwnerSet nextOwners = owners.allOwners ^ mask;
+        require(nextOwners != EMPTY_SET, CannotRemoveLastOwner());
+
+        owners.allOwners = nextOwners;
+
         delete owners.ownerInfo[owner];
 
         emit OwnerRemoved(owner);

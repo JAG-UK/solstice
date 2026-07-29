@@ -81,11 +81,24 @@ contract OwnersTest is Test {
     }
 
     function testFuzz_removeOwner(address owner) public {
-        vm.assume(owner != address(0));
+        address companion = makeAddr("removeOwnerCompanion");
+        vm.assume(owner != address(0) && owner != companion);
+
+        harness.addOwner(companion);
         harness.addOwner(owner);
         harness.removeOwner(owner);
         assertFalse(harness.isOwner(owner));
-        assertTrue(harness.getAllOwners() == EMPTY_SET);
+        assertTrue(harness.getAllOwners() == harness.asOwnerSet(companion));
+    }
+
+    function testFuzz_removeOwner_revertsWhenRemovingLastOwner(address owner) public {
+        vm.assume(owner != address(0));
+        harness.addOwner(owner);
+
+        vm.expectRevert(OwnersLibrary.CannotRemoveLastOwner.selector);
+        harness.removeOwner(owner);
+
+        assertTrue(harness.isOwner(owner));
     }
 
     function testFuzz_removeOwner_leavesOtherOwnersIntact(address a, address b, address c) public {
@@ -113,7 +126,10 @@ contract OwnersTest is Test {
     }
 
     function testFuzz_removeOwner_revertsAfterAlreadyRemoved(address a) public {
-        vm.assume(a != address(0));
+        address companion = makeAddr("alreadyRemovedCompanion");
+        vm.assume(a != address(0) && a != companion);
+
+        harness.addOwner(companion);
         harness.addOwner(a);
         harness.removeOwner(a);
 
@@ -122,8 +138,10 @@ contract OwnersTest is Test {
     }
 
     function testFuzz_addOwner_afterRemove_canReAdd(address owner) public {
-        vm.assume(owner != address(0));
+        address companion = makeAddr("reAddCompanion");
+        vm.assume(owner != address(0) && owner != companion);
 
+        harness.addOwner(companion);
         harness.addOwner(owner);
         harness.removeOwner(owner);
         harness.addOwner(owner);
