@@ -1,0 +1,26 @@
+name: foundry.lock
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check foundry.lock
+        run: |
+          status=0
+          while read -r path rev; do
+            actual=$(git ls-tree HEAD "$path" | awk '{print $3}')
+            if [ "$actual" != "$rev" ]; then
+              echo "::error::$path: foundry.lock rev $rev does not match submodule commit $actual"
+              status=1
+            fi
+          done < <(jq -r 'to_entries[] | "\(.key) \(.value | to_entries[0].value.rev)"' foundry.lock)
+          exit $status
