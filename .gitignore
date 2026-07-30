@@ -1,0 +1,6 @@
+# forge
+out/
+cache/
+
+# VIM
+*.swp
