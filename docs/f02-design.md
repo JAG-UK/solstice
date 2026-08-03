@@ -22,8 +22,8 @@ Pos    Field                  Change
  9     total_minted_reward    Renamed from total_storage_power_reward, position kept.
                               Accrues the full block reward, all streams (was
                               miners-only in FIP). FilMined reads it unchanged.
-10,11  simple_total,          Deleted, retired to code constants (code comment
-       baseline_total         suggests this "in a subsequent upgrade").
+10     simple_total           Deleted; use SIMPLE_TOTAL = 330,000,000 FIL.
+11     baseline_total         Deleted; use canonical BASELINE_TOTAL below.
 
 new    total_burn_minted      Cumulative burn (w0 residual + fold dust).
 new    total_service_minted   Cumulative service accrual, all explicit streams.
@@ -35,6 +35,8 @@ new    swa_timelock_epochs    Per-network hold (7 days mainnet, short on calibne
                               migration-set only, FIP-0081 ramp-params pattern.
 new    streams_root (CID)     Everything below.
 ```
+
+Reward calculation uses `SIMPLE_TOTAL = TokenAmount::from_whole(330_000_000)` and `BASELINE_TOTAL = TokenAmount::from_atto(768335872210768889362796814u128)`. The latter is the exact mainnet value fixed by the actors-v2 baseline migration; that migration made the value history-dependent, and Solstice deliberately canonicalises mainnet's value across networks rather than carrying either field forward. At calibnet epoch 3,946,715 the stored value was `769999999891760986050180387` attoFIL, so this cutover reduces `this_epoch_reward` there by approximately 0.0000321% at that state.
 
 Net roughly +63B on the 165B current f02 state root block (+91B added, -28B from the two deleted totals).
 
@@ -210,3 +212,7 @@ w2 (service,   id 2, EXPLICIT):  { v_start 0.05, slope +0.45/(9*EPOCHS_PER_QUART
 ```
 
 The slopes cancel over Q1 so nothing burns during bootstrap, and w2 hits its cap exactly at the Q1 boundary, auto-exiting the bootstrap ramp with no scheduled write needed. The service stream starts with the single-orchestrator share map (one wallet, share = 1) and the SRA as designated writer. `swa_timelock_epochs` is set per network here (the only place it's ever written).
+
+## Testing
+
+* **Reward constants after upgrade:** query f02 at two consecutive non-null tipsets whose stored `epoch` increases by one. Compute reward theta for each state from `effective_network_time`, `effective_baseline_power`, `cumsum_realized`, and `cumsum_baseline`; then require `compute_reward(post.epoch, pre_theta, post_theta, SIMPLE_TOTAL, BASELINE_TOTAL)` to equal the post-state `this_epoch_reward` exactly.
