@@ -14,8 +14,8 @@ bytecode_hash = "none"
 # For dependencies
 remappings = [
     'forge-std/=lib/forge-std/src/',
+    'fvm-solidity/=lib/fvm-solidity/src/',
     '@safe/=lib/safe-smart-account/contracts/',
-    #'@fvm-solidity/=lib/pdp/lib/fvm-solidity/src/',
 ]
 
 [lint]
@@ -23,5 +23,6 @@ severity = ["high", "med", "low", "info", "gas", "code-size"]
 exclude_lints = [
     "incorrect-shift",
     "multi-contract-file",
+    "unsafe-typecast",
     "unwrapped-modifier-logic",
 ]
