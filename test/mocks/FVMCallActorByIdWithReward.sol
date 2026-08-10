@@ -11,18 +11,15 @@ import {FVMCallActorById} from "fvm-solidity/mocks/FVMCallActorById.sol";
 
 import {FVMRewardActor} from "./FVMRewardActor.sol";
 
-/// @notice Extends fvm-solidity's CALL_ACTOR_BY_ID mock with a case for REWARD_ACTOR_ID.
-/// @dev fvm-solidity's FVMCallActorById has no branch for the reward actor (f02) and is not
-///      ours to modify -- these methods don't exist in builtin-actors yet (see
-///      FVMRewardActor.sol) and will only ever be called by solstice's own contracts. Rather
-///      than reimplement burn/power/datacap/miner handling here, this contract intercepts
-///      only REWARD_ACTOR_ID and forwards everything else, unmodified, to a freshly deployed
-///      FVMCallActorById via `delegatecall`. Using `delegatecall` (not `call`) is required: it
-///      is what preserves `address(this)`/`msg.sender` as the original caller all the way
-///      through to FVMCallActorById's `_handleBurn`, which debits `address(this).balance`
-///      expecting that to be the real caller's balance, not this contract's.
-/// @dev Etch this at CALL_ACTOR_BY_ID (replacing the vanilla FVMCallActorById) via
-///      MockRewardTest, after MockFVMTest.setUp() has already run.
+/// @notice Extends fvm-solidity's CALL_ACTOR_BY_ID mock with a branch for REWARD_ACTOR_ID (f02).
+/// @dev Serves calls addressed to f02 from FVMRewardActor and forwards every other actor id,
+///      unmodified, to an FVMCallActorById deployed at construction, leaving burn, power, datacap
+///      and miner behaviour with fvm-solidity.
+/// @dev That forward is a `delegatecall` and must stay one. It preserves `address(this)` and
+///      `msg.sender` as the original caller through to FVMCallActorById's `_handleBurn`, which
+///      debits `address(this).balance`; under `call` the debit lands on this contract instead.
+/// @dev Etch at CALL_ACTOR_BY_ID, replacing the vanilla FVMCallActorById, via MockRewardTest and
+///      after MockFVMTest.setUp() has run.
 contract FVMCallActorByIdWithReward {
     address private immutable BASE;
     FVMRewardActor private immutable REWARD;

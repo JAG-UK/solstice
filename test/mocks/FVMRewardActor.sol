@@ -11,7 +11,6 @@ import {
     SET_WEIGHT_RECORDS,
     STEP_WEIGHT_RECORDS,
     SET_SHARES,
-    GET_STATE,
     REGISTER_STREAM,
     REMOVE_STREAM,
     SET_DISTRIBUTION,
@@ -24,9 +23,12 @@ import {WeightRecord, DistributionKind, Share, PendingOp} from "../../src/lib/FV
 /// @dev Weights, and per-orchestrator shares, are WAD-scaled: 1e18 == 1.0 == 100%.
 int256 constant WAD = 1e18;
 
-/// @dev Mock-only caps; f02 requires these limits to exist but never fixes their values.
+/// @dev f02's caps, fixed by FIP-0118.
 uint64 constant MAX_STREAMS = 8;
 uint256 constant MAX_RECIPIENTS = 64;
+
+/// @dev FRC-0042's floor. Below it a method is internal API, closed to EVM callers.
+uint64 constant FIRST_EXPORTED_METHOD_NUMBER = 1 << 24;
 
 /// @dev Same value as WAD, typed uint256, so summing shares needs no signed-to-unsigned cast.
 uint256 constant SHARE_TOTAL = 1e18;
@@ -36,8 +38,8 @@ struct LedgerRow {
     uint256 amount;
 }
 
-/// @dev Enumerable, prunable address->uint256 balance -- plain mappings-plus-array, not the
-/// builtin-actor's CBOR-behind-a-CID shape (fine: nothing implements that wire format yet).
+/// @dev Enumerable, prunable address->uint256 balance, as plain mappings plus an array. This is
+/// not f02's on-chain shape, which is CBOR behind a CID, and no contract can read either one.
 struct Ledger {
     mapping(address => uint256) amount;
     mapping(address => uint256) indexPlusOne; // 0 == not tracked
@@ -103,11 +105,21 @@ struct PendingView {
     address writer;
 }
 
+/// @notice Everything mockState reports, bundled so call sites don't juggle an 8-way tuple.
+struct MockState {
+    uint256 totalMintedReward;
+    uint256 totalBurnMinted;
+    uint256 totalServiceMinted;
+    uint64 nextTransitionEpoch;
+    uint64 swaTimelockEpochs;
+    StreamView[] streams;
+    TombstoneView[] tombstones;
+    PendingView[] pendingWrites;
+}
+
 /// @notice Mock for the Filecoin Reward actor (f02), covering its stream-splitting methods.
 /// @dev Etch at REWARD_ACTOR_ADDRESS via MockRewardTest, which also re-etches CALL_ACTOR_BY_ID
 ///      to reach handle_filecoin_method below.
-/// @dev GetState persists due writes rather than only projecting them; behaviorally identical
-///      once `effectiveEpoch` has passed.
 contract FVMRewardActor {
     /// @dev Survives vm.etch: immutables are baked into runtime bytecode at deploy time.
     Vm private immutable VM;
@@ -198,7 +210,7 @@ contract FVMRewardActor {
         emit BlockRewardAwarded(br, minerPortion, servicePortion, burnAmount);
     }
 
-    /// @notice Test helper: an EXPLICIT stream's wallet-to-share map, without the GetState round trip.
+    /// @notice Test helper: an EXPLICIT stream's wallet-to-share map.
     function getShares(uint64 streamId) external view returns (Share[] memory) {
         return _streams[streamId].shares;
     }
@@ -214,7 +226,8 @@ contract FVMRewardActor {
     }
 
     /// @notice Test helper: the clamp(v_start + slope*(e-t_start), floor, cap) math, exposed
-    /// directly since it isn't a dispatched method (GetState already projects each weight).
+    /// directly: an SWA has to mirror this schedule itself, and the mock is where a divergence
+    /// between its copy and f02's should surface.
     function clampWeight(WeightRecord memory record, uint64 epoch) external pure returns (int256) {
         return _clampWeight(record, epoch);
     }
@@ -234,11 +247,14 @@ contract FVMRewardActor {
         external
         returns (uint32, uint64, bytes memory)
     {
+        // restrict_internal_api: the internal API (AwardBlockReward, ThisEpochReward,
+        // UpdateNetworkKPI, Constructor) is closed to EVM callers, and everything reaching a mock
+        // through CALL_ACTOR_BY_ID is one. ThisEpochReward is not a back door.
+        if (method < FIRST_EXPORTED_METHOD_NUMBER) return (USR_FORBIDDEN, 0, "");
         _settle();
         if (method == SET_WEIGHT_RECORDS) return _queueWeightWrite(PendingOp.SET_WEIGHT, params);
         if (method == STEP_WEIGHT_RECORDS) return _queueWeightWrite(PendingOp.STEP_WEIGHT, params);
         if (method == SET_SHARES) return _setShares(params);
-        if (method == GET_STATE) return _getState();
         if (method == REGISTER_STREAM) return _registerStream(params);
         if (method == REMOVE_STREAM) return _removeStream(params);
         if (method == SET_DISTRIBUTION) return _setDistribution(params);
@@ -305,6 +321,10 @@ contract FVMRewardActor {
 
         uint256 total;
         for (uint256 i = 0; i < newShares.length; i++) {
+            if (newShares[i].share == 0) return (USR_ILLEGAL_ARGUMENT, 0, "");
+            for (uint256 j = 0; j < i; j++) {
+                if (newShares[j].wallet == newShares[i].wallet) return (USR_ILLEGAL_ARGUMENT, 0, "");
+            }
             total += newShares[i].share;
         }
         if (total != SHARE_TOTAL) return (USR_ILLEGAL_ARGUMENT, 0, "");
@@ -318,7 +338,13 @@ contract FVMRewardActor {
         return (0, 0, "");
     }
 
-    function _getState() internal view returns (uint32, uint64, bytes memory) {
+    /// @notice Test helper: the mock's whole state, read directly rather than through a method.
+    /// @dev f02 exposes no reads at all, so an SWA or SRA must mirror anything it needs in its own
+    /// state. Tests are not so constrained, and reading here keeps that asymmetry visible.
+    /// @dev A true view: it does not settle. Advancing the epoch and reading without an
+    /// intervening mutating call shows nothing applied, exactly as f02 behaves. Use mockSettle to
+    /// apply due writes.
+    function mockState() external view returns (MockState memory) {
         uint64 nowEpoch = uint64(block.number);
 
         StreamView[] memory streams = new StreamView[](_streamIds.length);
@@ -358,20 +384,21 @@ contract FVMRewardActor {
             });
         }
 
-        return (
-            0,
-            0,
-            abi.encode(
-                totalMintedReward,
-                totalBurnMinted,
-                totalServiceMinted,
-                nextTransitionEpoch,
-                swaTimelockEpochs,
-                streams,
-                tombstones,
-                pendingWrites
-            )
-        );
+        return MockState({
+            totalMintedReward: totalMintedReward,
+            totalBurnMinted: totalBurnMinted,
+            totalServiceMinted: totalServiceMinted,
+            nextTransitionEpoch: nextTransitionEpoch,
+            swaTimelockEpochs: swaTimelockEpochs,
+            streams: streams,
+            tombstones: tombstones,
+            pendingWrites: pendingWrites
+        });
+    }
+
+    /// @notice Test helper: applies due writes, as f02 does at the head of every mutating call.
+    function mockSettle() external {
+        _settle();
     }
 
     function _registerStream(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
@@ -465,6 +492,9 @@ contract FVMRewardActor {
         if (msg.sender != swa) return (USR_FORBIDDEN, 0, "");
         // Params CBOR: [id, op]
         (uint64 id, PendingOp op) = _decodeCancelPendingParams(params);
+        // StepWeightRecords is the one uncancellable op: the discretionary path must not be able
+        // to revoke a governance-gated write.
+        if (op == PendingOp.STEP_WEIGHT) return (USR_ILLEGAL_ARGUMENT, 0, "");
         if (_pendingExists[id][op]) {
             delete _pending[id][op];
             _pendingExists[id][op] = false;
@@ -827,8 +857,10 @@ contract FVMRewardActor {
     }
 
     /// @dev Per-record sanity required at write time: 0 <= floor <= cap <= 1.
+    /// @dev validate_weight_record: floor <= v_start <= cap <= DENOM. The lower bound on floor
+    /// is implicit in f02, where these three are u64; here they are signed and it is not.
     function _sane(WeightRecord memory w) internal pure returns (bool) {
-        return w.floor >= 0 && w.floor <= w.cap && w.cap <= WAD;
+        return w.floor >= 0 && w.floor <= w.cap && w.cap <= WAD && w.vStart >= w.floor && w.vStart <= w.cap;
     }
 
     /// @dev Sum of every registered stream's weight at `atEpoch`, excluding `excludeIds`.

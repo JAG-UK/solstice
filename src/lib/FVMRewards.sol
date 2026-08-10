@@ -18,10 +18,11 @@ import {
 } from "./FVMRewardMethod.sol";
 import {WeightRecord, DistributionKind, Share, PendingOp} from "./FVMRewardTypes.sol";
 
-/// @notice Calls the f02 (Reward actor) methods proposed by FIP-1270, for the Stream Weight
-/// Actor (solstice#3) and Service Rewards Actor (solstice#4). f02 does not exist upstream yet
-/// (filecoin-project/builtin-actors#1764); the wire format here is this repo's best-effort
-/// CBOR encoding of the FIP's draft method signatures, not an upstream-confirmed ABI.
+/// @notice Calls the f02 (Reward actor) methods specified by FIP-0118, for the Stream Weight
+/// Actor (solstice#3) and Service Rewards Actor (solstice#4).
+/// @dev The param encodings are unverified against f02's own serialization vectors
+/// (builtin-actors `actors/reward/tests/types_test.rs`). Until they are checked against those,
+/// agreement with the mock in this repo is not evidence of agreement with the chain.
 /// @dev Every write params blob is a CBOR array of positional fields; addresses are encoded as
 /// CBOR byte strings wrapping an f410 delegated address (0x04, 0x0a, 20 address bytes). No
 /// abi.encode/abi.decode: params are hand-built in assembly and Filecoin BigInt returns are

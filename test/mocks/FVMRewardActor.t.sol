@@ -17,20 +17,20 @@ import {
     PendingOp,
     StreamView,
     TombstoneView,
-    PendingView,
+    MockState,
     WAD,
     MAX_STREAMS,
     MAX_RECIPIENTS,
     SHARE_TOTAL
 } from "./FVMRewardActor.sol";
-import {STEP_WEIGHT_RECORDS, GET_STATE, SWA_TIMELOCK} from "../../src/lib/FVMRewardMethod.sol";
+import {STEP_WEIGHT_RECORDS, CLAIM, SWA_TIMELOCK} from "../../src/lib/FVMRewardMethod.sol";
 import {FVMRewards} from "../../src/lib/FVMRewards.sol";
 
 /// @dev A distinct external caller, so tests can check authorization by identity rather than
 /// by happenstance of who the test contract is. The typed methods below go through FVMRewards
 /// itself (production code, not a hand-rolled duplicate encoder) so these tests double as
-/// FVMRewards<->mock wire-format coverage; `call` remains for methods FVMRewards doesn't cover
-/// yet (StepWeightRecords, GetState) and for tests that need to send malformed params on purpose.
+/// FVMRewards<->mock wire-format coverage. `call` serves StepWeightRecords, which has no library
+/// wrapper, and tests that send malformed params on purpose.
 contract RewardCaller {
     function call(uint64 method, bytes memory params) external returns (uint32 exitCode, bytes memory data) {
         bytes memory callData = abi.encode(method, uint256(0), NO_FLAGS, uint64(0), params, REWARD_ACTOR_ID);
@@ -154,51 +154,15 @@ contract FVMRewardActorTest is MockRewardTest {
 
     function _warpPastTimelockAndSettle() internal {
         vm.roll(block.number + SWA_TIMELOCK);
-        _call(GET_STATE, ""); // any dispatched call settles pending writes
+        rewardActor().mockSettle();
     }
 
-    /// @dev Bundled as a struct so call sites don't juggle an 8-way tuple.
-    struct GetStateResult {
-        uint256 totalMintedReward;
-        uint256 totalBurnMinted;
-        uint256 totalServiceMinted;
-        uint64 nextTransitionEpoch;
-        uint64 swaTimelockEpochs;
-        StreamView[] streams;
-        TombstoneView[] tombstones;
-        PendingView[] pendingWrites;
+    /// @dev f02 has no read methods, so this reads the mock directly rather than dispatching.
+    function _getState() internal view returns (MockState memory) {
+        return rewardActor().mockState();
     }
 
-    function _getState() internal returns (GetStateResult memory r) {
-        (uint32 exitCode, bytes memory data) = _call(GET_STATE, "");
-        assertEq(exitCode, 0);
-        // Not `abi.decode(data, (GetStateResult))`: that single-struct-type decode sugar
-        // silently mis-decodes this array-of-structs-with-nested-arrays depth on solc 0.8.36
-        // without via-ir. The tuple-typed decode below is correct, but must land in fresh
-        // locals -- assigning straight into named returns hits `stack too deep`.
-        (
-            uint256 totalMintedReward,
-            uint256 totalBurnMinted,
-            uint256 totalServiceMinted,
-            uint64 nextTransitionEpoch,
-            uint64 swaTimelockEpochs,
-            StreamView[] memory streams,
-            TombstoneView[] memory tombstones,
-            PendingView[] memory pendingWrites
-        ) = abi.decode(data, (uint256, uint256, uint256, uint64, uint64, StreamView[], TombstoneView[], PendingView[]));
-        r = GetStateResult({
-            totalMintedReward: totalMintedReward,
-            totalBurnMinted: totalBurnMinted,
-            totalServiceMinted: totalServiceMinted,
-            nextTransitionEpoch: nextTransitionEpoch,
-            swaTimelockEpochs: swaTimelockEpochs,
-            streams: streams,
-            tombstones: tombstones,
-            pendingWrites: pendingWrites
-        });
-    }
-
-    function _streams() internal returns (StreamView[] memory) {
+    function _streams() internal view returns (StreamView[] memory) {
         return _getState().streams;
     }
 
@@ -247,6 +211,7 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(exitCode, 0);
 
         vm.roll(block.number + 10);
+        rewardActor().mockSettle();
         assertEq(_streams().length, 1, "must settle after the overridden (short) hold");
     }
 
@@ -288,11 +253,11 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(_clampWeight(r, 1_000_000), 0.3e18);
     }
 
-    function test_GetState_Empty_ReturnsNoStreams() public {
+    function test_MockState_Empty_ReturnsNoStreams() public view {
         assertEq(_streams().length, 0);
     }
 
-    function test_GetState_ReflectsRegisteredStream_WithMatchingWeight() public {
+    function test_MockState_ReflectsRegisteredStream_WithMatchingWeight() public {
         WeightRecord memory r = _constantRecord(0.4e18);
         assertEq(_registerStream(SERVICE_ID, r, DistributionKind.EXPLICIT, address(writerCaller)), 0);
         _warpPastTimelockAndSettle();
@@ -342,6 +307,16 @@ contract FVMRewardActorTest is MockRewardTest {
     function test_RegisterStream_FloorBelowZero_IllegalArgument() public {
         WeightRecord memory r = _record(0.1e18, 0, 0, -1, WAD);
         assertEq(_registerStream(SERVICE_ID, r, DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT);
+    }
+
+    // validate_weight_record pins v_start inside the clamp band. Outside it the record still
+    // evaluates (compute_weight clamps) but its anchor claims a value the schedule can never take,
+    // which makes the record's own numbers a lie about what it pays.
+    function test_RegisterStream_VStartOutsideClampBand_IllegalArgument() public {
+        WeightRecord memory below = _record(0.1e18, 0, 0, 0.2e18, 0.5e18);
+        assertEq(_registerStream(SERVICE_ID, below, DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT);
+        WeightRecord memory above = _record(0.6e18, 0, 0, 0.2e18, 0.5e18);
+        assertEq(_registerStream(SERVICE_ID, above, DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT);
     }
 
     function test_RegisterStream_ImplicitWithWriter_IllegalArgument() public {
@@ -658,6 +633,26 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(over, USR_ILLEGAL_ARGUMENT);
     }
 
+    // A zero share is rejected outright rather than stored as a no-op row: validate_shares treats
+    // "listed but paid nothing" as a caller mistake, since omitting the recipient says it exactly.
+    function test_SetShares_ZeroShare_IllegalArgument() public {
+        _registerExplicit(SERVICE_ID, address(writerCaller));
+        Share[] memory shares_ = new Share[](2);
+        shares_[0] = Share({wallet: RECIPIENT_A, share: SHARE_TOTAL});
+        shares_[1] = Share({wallet: RECIPIENT_B, share: 0});
+        assertEq(writerCaller.setShares(SERVICE_ID, shares_), USR_ILLEGAL_ARGUMENT);
+    }
+
+    // Duplicates are rejected rather than summed: two rows for one wallet make the map's meaning
+    // depend on iteration order.
+    function test_SetShares_DuplicateRecipient_IllegalArgument() public {
+        _registerExplicit(SERVICE_ID, address(writerCaller));
+        Share[] memory shares_ = new Share[](2);
+        shares_[0] = Share({wallet: RECIPIENT_A, share: SHARE_TOTAL / 2});
+        shares_[1] = Share({wallet: RECIPIENT_A, share: SHARE_TOTAL / 2});
+        assertEq(writerCaller.setShares(SERVICE_ID, shares_), USR_ILLEGAL_ARGUMENT);
+    }
+
     function test_SetShares_TooManyRecipients_IllegalArgument() public {
         _registerExplicit(SERVICE_ID, address(writerCaller));
         uint256 n = MAX_RECIPIENTS + 1;
@@ -873,17 +868,19 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(_streams().length, 1, "cancelled removal must never take effect");
     }
 
-    // "No cancel path" is SWA-side discipline; f02 itself treats every op uniformly.
-    function test_CancelPending_StepWeightRecords_IsCancellableLikeAnyOtherOp() public {
+    // StepWeightRecords is uncancellable in f02, and that is enforced by the actor rather than
+    // left to SWA discipline: the discretionary path must not be able to revoke a write the
+    // governance gate produced.
+    function test_CancelPending_StepWeightRecords_IsRejected() public {
         _registerExplicit(SERVICE_ID, address(writerCaller));
         (uint32 stepExit,) = swaCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.9e18)));
         assertEq(stepExit, 0);
 
         uint32 cancelExit = swaCaller.cancelPending(SERVICE_ID, PendingOp.STEP_WEIGHT);
-        assertEq(cancelExit, 0);
+        assertEq(cancelExit, USR_ILLEGAL_ARGUMENT, "a gate-originated write cannot be cancelled");
 
         _warpPastTimelockAndSettle();
-        assertEq(_streams()[0].weightRecord.vStart, 0.1e18);
+        assertEq(_streams()[0].weightRecord.vStart, 0.9e18, "the gate write must still apply");
     }
 
     function test_CancelPending_OnlyCancelsMatchingOp() public {
@@ -1049,6 +1046,23 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(exitCode, USR_UNHANDLED_MESSAGE);
     }
 
+    // restrict_internal_api: f02's internal API is closed to EVM callers, so ThisEpochReward is
+    // not a back door to the weight schedule and AwardBlockReward cannot be driven from a
+    // contract. Every method below FRC-0042's floor is forbidden, not merely unhandled.
+    function test_InternalApi_ForbiddenToEvmCallers() public {
+        uint64[4] memory internalMethods = [uint64(1), 2, 3, 4]; // Constructor, Award, ThisEpoch, KPI
+        for (uint256 i = 0; i < internalMethods.length; i++) {
+            (uint32 exitCode,) = swaCaller.call(internalMethods[i], "");
+            assertEq(exitCode, USR_FORBIDDEN, "internal API must be forbidden, not unhandled");
+        }
+    }
+
+    // Above the floor, an unrecognised method is merely unhandled.
+    function test_UnknownExportedMethod_Unhandled() public {
+        (uint32 exitCode,) = swaCaller.call(type(uint64).max, "");
+        assertEq(exitCode, USR_UNHANDLED_MESSAGE);
+    }
+
     // The real precompile requires delegatecall; a direct call/staticcall must fail.
     function test_DirectCallToPrecompile_Reverts() public {
         (bool ok,) = CALL_ACTOR_BY_ID.call("");
@@ -1057,7 +1071,7 @@ contract FVMRewardActorTest is MockRewardTest {
 
     // None of the reward actor's methods accept a value; the mock must not silently drop it.
     function test_NonzeroValue_IllegalArgument() public {
-        bytes memory callData = abi.encode(GET_STATE, uint256(1), NO_FLAGS, uint64(0), bytes(""), REWARD_ACTOR_ID);
+        bytes memory callData = abi.encode(CLAIM, uint256(1), NO_FLAGS, uint64(0), bytes(""), REWARD_ACTOR_ID);
         (bool ok, bytes memory ret) = CALL_ACTOR_BY_ID.delegatecall(callData);
         assertTrue(ok);
         (uint32 exitCode,,) = abi.decode(ret, (uint32, uint64, bytes));

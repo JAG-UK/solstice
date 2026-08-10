@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
-/// @notice A stream's Distribution kind (FIP-1270 Section 2.4).
+/// @notice A stream's Distribution kind (FIP-0118 Section 2.4).
 /// @dev IMPLICIT streams store no writer (f02 resolves the recipient from protocol state).
 ///      EXPLICIT streams are paid out per a wallet-to-share map written by their designated writer.
 enum DistributionKind {
