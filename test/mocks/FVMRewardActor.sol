@@ -74,7 +74,19 @@ struct Pending {
     address writer; // REGISTER / SET_DISTRIBUTION payload
 }
 
+/// @notice A queued weight batch: the whole `SetWeightRecords` or `StepWeightRecords` call as one
+/// entry. Both ops key their slot by op alone, so a second batch is rejected while one is pending
+/// even when it names entirely different streams.
+struct WeightBatch {
+    uint64 effectiveEpoch;
+    uint64[] ids;
+    WeightRecord[] records;
+}
+
+/// @dev `hasId` is false for the two weight ops, whose slot is schedule-wide and carries a null id
+/// on the wire.
 struct PendingKey {
+    bool hasId;
     uint64 id;
     PendingOp op;
 }
@@ -97,6 +109,7 @@ struct TombstoneView {
 }
 
 struct PendingView {
+    bool hasId; // false for the two schedule-wide weight slots
     uint64 id;
     PendingOp op;
     uint64 effectiveEpoch;
@@ -157,6 +170,9 @@ contract FVMRewardActor {
     /// cleared where a registration applies and where one is queued.
     mapping(uint64 streamId => Share[]) internal _pendingShares;
 
+    mapping(PendingOp => WeightBatch) internal _pendingWeight;
+    mapping(PendingOp => bool) internal _pendingWeightExists;
+
     mapping(uint64 streamId => mapping(PendingOp => Pending)) internal _pending;
     mapping(uint64 streamId => mapping(PendingOp => bool)) internal _pendingExists;
     PendingKey[] internal _pendingKeys;
@@ -165,6 +181,9 @@ contract FVMRewardActor {
     /// @dev Fires only when an occupied slot is actually removed; cancelling an empty slot is a no-op.
     event PendingCancelled(uint64 indexed streamId, PendingOp op);
     event BlockRewardAwarded(uint256 br, uint256 minerPortion, uint256 servicePortion, uint256 burnAmount);
+    /// @dev A due write that no longer validates. Events are the only surface a drop has, so an
+    /// SWA cannot tell a dropped write from an applied one.
+    event PendingDropped(uint64 indexed streamId, PendingOp op);
 
     /// @notice Test helper: sets the defaults an inline initializer would give this contract; call once, right after etching.
     function mockInit() external {
@@ -278,35 +297,35 @@ contract FVMRewardActor {
         (uint64[] memory ids, WeightRecord[] memory records) = _decodeSetWeightRecordsParams(params);
         if (ids.length != records.length) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
+        // One slot per op for the whole schedule, so a pending batch blocks the next one outright.
+        if (_pendingWeightExists[op]) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        if (ids.length == 0) return (USR_ILLEGAL_ARGUMENT, 0, "");
+
         uint64 effectiveEpoch = uint64(block.number) + swaTimelockEpochs;
         for (uint256 i = 0; i < ids.length; i++) {
             if (!_streams[ids[i]].exists) return (USR_NOT_FOUND, 0, "");
             if (!_sane(records[i])) return (USR_ILLEGAL_ARGUMENT, 0, "");
-            if (_pendingExists[ids[i]][op]) return (USR_ILLEGAL_ARGUMENT, 0, "");
-            // Reject repeats: they'd queue two PendingKeys for one (id, op) slot.
             for (uint256 j = 0; j < i; j++) {
                 if (ids[j] == ids[i]) return (USR_ILLEGAL_ARGUMENT, 0, "");
             }
         }
-        // Guardrail: sum of every stream's weight, including the proposed ones, must not exceed 1.
-        int256 sum = _sumWeightsExcluding(ids, effectiveEpoch);
-        for (uint256 i = 0; i < records.length; i++) {
-            sum += _clampWeight(records[i], effectiveEpoch);
-        }
-        if (sum > WAD) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        NewWrite memory proposed;
+        proposed.present = true;
+        proposed.op = op;
+        proposed.effectiveEpoch = effectiveEpoch;
+        proposed.batchIds = ids;
+        proposed.batchRecords = records;
+        if (!_admits(proposed)) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
+        WeightBatch storage batch = _pendingWeight[op];
+        batch.effectiveEpoch = effectiveEpoch;
         for (uint256 i = 0; i < ids.length; i++) {
-            _queueWrite(
-                ids[i],
-                op,
-                Pending({
-                    effectiveEpoch: effectiveEpoch,
-                    weightRecord: records[i],
-                    distributionKind: DistributionKind.IMPLICIT,
-                    writer: address(0)
-                })
-            );
+            batch.ids.push(ids[i]);
+            batch.records.push(records[i]);
         }
+        _pendingWeightExists[op] = true;
+        _pendingKeys.push(PendingKey({hasId: false, id: 0, op: op}));
+        if (effectiveEpoch < nextTransitionEpoch) nextTransitionEpoch = effectiveEpoch;
         return (0, 0, "");
     }
 
@@ -368,8 +387,23 @@ contract FVMRewardActor {
         PendingView[] memory pendingWrites = new PendingView[](_pendingKeys.length);
         for (uint256 i = 0; i < _pendingKeys.length; i++) {
             PendingKey memory k = _pendingKeys[i];
+            if (!k.hasId) {
+                // A weight slot carries no per-stream payload; its records are the batch. Reading
+                // `_pending[0][op]` here would report an unrelated entry as this slot's payload.
+                pendingWrites[i] = PendingView({
+                    hasId: false,
+                    id: 0,
+                    op: k.op,
+                    effectiveEpoch: _pendingWeight[k.op].effectiveEpoch,
+                    weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: 0, floor: 0, cap: 0}),
+                    distributionKind: DistributionKind.IMPLICIT,
+                    writer: address(0)
+                });
+                continue;
+            }
             Pending storage p = _pending[k.id][k.op];
             pendingWrites[i] = PendingView({
+                hasId: true,
                 id: k.id,
                 op: k.op,
                 effectiveEpoch: p.effectiveEpoch,
@@ -402,6 +436,9 @@ contract FVMRewardActor {
             _decodeRegisterStreamParams(params);
         DistributionKind kind = writer == address(0) ? DistributionKind.IMPLICIT : DistributionKind.EXPLICIT;
 
+        // Zero is reserved, and could come to signify the burn stream; ids match the w1/w2
+        // subscripts, so consensus is 1 and service is 2.
+        if (id == 0) return (USR_ILLEGAL_ARGUMENT, 0, "");
         // Rejects any id collision it can see: a live stream, an undrained tombstone, or an
         // already-queued registration. Reuse after a tombstone fully drains is SWA discipline.
         if (_streams[id].exists || _tombstones[id].exists || _pendingExists[id][PendingOp.REGISTER]) {
@@ -421,8 +458,14 @@ contract FVMRewardActor {
         }
         if (activationEpoch < uint64(block.number) + swaTimelockEpochs) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
-        int256 sum = _sumWeightsExcluding(new uint64[](0), activationEpoch) + _clampWeight(record, activationEpoch);
-        if (sum > WAD) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        NewWrite memory proposed;
+        proposed.present = true;
+        proposed.hasId = true;
+        proposed.id = id;
+        proposed.op = PendingOp.REGISTER;
+        proposed.effectiveEpoch = activationEpoch;
+        proposed.record = record;
+        if (!_admits(proposed)) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
         delete _pendingShares[id];
         for (uint256 i = 0; i < shares.length; i++) {
@@ -447,6 +490,14 @@ contract FVMRewardActor {
         (id,) = _decodeCborUint64(_calldataPos(params) + 1); // 1-element tuple header
         if (!_streams[id].exists) return (USR_NOT_FOUND, 0, "");
         if (_pendingExists[id][PendingOp.REMOVE]) return (USR_ILLEGAL_ARGUMENT, 0, "");
+
+        NewWrite memory proposed;
+        proposed.present = true;
+        proposed.hasId = true;
+        proposed.id = id;
+        proposed.op = PendingOp.REMOVE;
+        proposed.effectiveEpoch = uint64(block.number) + swaTimelockEpochs;
+        if (!_admits(proposed)) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
         _queueWrite(
             id,
@@ -475,6 +526,14 @@ contract FVMRewardActor {
         if (_streams[id].kind != DistributionKind.EXPLICIT) return (USR_ILLEGAL_ARGUMENT, 0, "");
         if (_pendingExists[id][PendingOp.SET_DISTRIBUTION]) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
+        NewWrite memory proposed;
+        proposed.present = true;
+        proposed.hasId = true;
+        proposed.id = id;
+        proposed.op = PendingOp.SET_DISTRIBUTION;
+        proposed.effectiveEpoch = uint64(block.number) + swaTimelockEpochs;
+        if (!_admits(proposed)) return (USR_ILLEGAL_ARGUMENT, 0, "");
+
         _queueWrite(
             id,
             PendingOp.SET_DISTRIBUTION,
@@ -498,26 +557,27 @@ contract FVMRewardActor {
         // StepWeightRecords is the one uncancellable op: the discretionary path must not be able
         // to revoke a governance-gated write.
         if (op == PendingOp.STEP_WEIGHT) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        // Shape mismatch: the weight slots are schedule-wide and are addressed with a null id,
+        // every other op names its stream. Neither can be cancelled through the other's shape.
+        if (hasId && op == PendingOp.SET_WEIGHT) return (USR_ILLEGAL_ARGUMENT, 0, "");
         // A weight write is one schedule-wide entry addressed with a null id. Until the slot model
         // matches, cancelling one clears every stream's share of that batch, which is the same
         // observable outcome.
         if (!hasId) {
             if (op != PendingOp.SET_WEIGHT) return (USR_ILLEGAL_ARGUMENT, 0, "");
-            for (uint256 i = _pendingKeys.length; i > 0; i--) {
-                PendingKey memory k = _pendingKeys[i - 1];
-                if (k.op != op) continue;
-                delete _pending[k.id][op];
-                _pendingExists[k.id][op] = false;
-                _swapRemove(_pendingKeys, i - 1);
-                emit PendingCancelled(k.id, op);
+            if (_pendingWeightExists[op]) {
+                delete _pendingWeight[op];
+                _pendingWeightExists[op] = false;
+                _removePendingKey(false, 0, op);
+                _recomputeNextTransition();
+                emit PendingCancelled(0, op);
             }
-            _recomputeNextTransition();
             return (0, 0, "");
         }
         if (_pendingExists[id][op]) {
             delete _pending[id][op];
             _pendingExists[id][op] = false;
-            _removePendingKey(id, op);
+            _removePendingKey(true, id, op);
             _recomputeNextTransition();
             emit PendingCancelled(id, op);
         }
@@ -940,34 +1000,244 @@ contract FVMRewardActor {
         return w.floor >= 0 && w.floor <= w.cap && w.cap <= WAD && w.vStart >= w.floor && w.vStart <= w.cap;
     }
 
-    /// @dev Sum of every registered stream's weight at `atEpoch`, excluding `excludeIds`.
-    function _sumWeightsExcluding(uint64[] memory excludeIds, uint64 atEpoch) internal view returns (int256 sum) {
-        for (uint256 i = 0; i < _streamIds.length; i++) {
-            uint64 id = _streamIds[i];
-            bool excluded = false;
-            for (uint256 j = 0; j < excludeIds.length; j++) {
-                if (excludeIds[j] == id) {
-                    excluded = true;
-                    break;
-                }
+    // -------------------------------------------------------------------------
+    // Projected-schedule validation
+    //
+    // A queued write is admitted by walking the queue in effective-epoch order, applying each
+    // entry to a candidate state and checking the schedule from that entry's effective epoch.
+    // Entries that fail are dropped. The write is refused if it fails in its own position, or if
+    // the walk accepts fewer slots than it did without it.
+    //
+    // Not modelled: f02 lets SetWeightRecords repair a settled schedule that does not validate.
+    // The mock cannot install one, so that path is unreachable.
+    // -------------------------------------------------------------------------
+
+    /// @dev A stream as the projection sees it: only what the schedule check reads.
+    struct ProjectedStream {
+        uint64 id;
+        WeightRecord record;
+    }
+
+    /// @dev The write under consideration, spliced into the queue at its effective epoch.
+    struct NewWrite {
+        bool present;
+        bool hasId;
+        uint64 id;
+        PendingOp op;
+        uint64 effectiveEpoch;
+        WeightRecord record; // REGISTER
+        uint64[] batchIds; // SET_WEIGHT / STEP_WEIGHT
+        WeightRecord[] batchRecords;
+    }
+
+    /// @dev Epochs where the weight sum can peak from `fromEpoch` on. Clamped linears peak on a
+    /// kink or at the end, so this yields each record's anchor, its clamp crossings and the last
+    /// epoch. Crossings carry neighbours either side, since integer division lands off the kink.
+    function _breakpoints(WeightRecord memory r, uint64 fromEpoch, uint64[] memory out, uint256 c)
+        private
+        pure
+        returns (uint256)
+    {
+        if (r.tStart >= fromEpoch) out[c++] = r.tStart;
+        if (r.slope == 0) return c;
+
+        c = _crossing(r, r.slope > 0 ? r.cap : r.floor, fromEpoch, out, c);
+        // The opposite bound is only crossed going forward when validation starts before the anchor.
+        if (fromEpoch < r.tStart) c = _crossing(r, r.slope > 0 ? r.floor : r.cap, fromEpoch, out, c);
+        return c;
+    }
+
+    function _crossing(WeightRecord memory r, int256 bound, uint64 fromEpoch, uint64[] memory out, uint256 c)
+        private
+        pure
+        returns (uint256)
+    {
+        int256 base = int256(uint256(r.tStart)) + (bound - r.vStart) / r.slope;
+        for (int256 off = -1; off <= 1; off++) {
+            int256 e = base + off;
+            if (e >= int256(uint256(fromEpoch)) && e <= int256(uint256(type(uint64).max))) {
+                out[c++] = uint64(uint256(e));
             }
-            if (!excluded) sum += _effectiveWeight(id, atEpoch);
+        }
+        return c;
+    }
+
+    /// @dev Whether the streams sum to at most one at every epoch from `fromEpoch` onward.
+    function _scheduleValid(ProjectedStream[] memory live, uint256 n, uint64 fromEpoch) private pure returns (bool) {
+        uint64[] memory epochs = new uint64[](n * 7 + 2);
+        uint256 c = 0;
+        epochs[c++] = fromEpoch;
+        epochs[c++] = type(uint64).max;
+        for (uint256 i = 0; i < n; i++) {
+            c = _breakpoints(live[i].record, fromEpoch, epochs, c);
+        }
+        for (uint256 e = 0; e < c; e++) {
+            int256 sum;
+            for (uint256 i = 0; i < n; i++) {
+                sum += _clampWeight(live[i].record, epochs[e]);
+            }
+            if (sum > WAD) return false;
+        }
+        return true;
+    }
+
+    function _settledProjection() private view returns (ProjectedStream[] memory live, uint256 n) {
+        live = new ProjectedStream[](_streamIds.length + _pendingKeys.length + 2);
+        n = _streamIds.length;
+        for (uint256 i = 0; i < n; i++) {
+            live[i] = ProjectedStream({id: _streamIds[i], record: _streams[_streamIds[i]].weightRecord});
         }
     }
 
-    /// @dev A stream's weight at `atEpoch`, using a still-pending SET_WEIGHT/STEP_WEIGHT write's
-    /// record instead of the stale settled one when queued (the larger of the two if both are
-    /// queued), so the WAD guardrail can't be bypassed by splitting increases across batches.
-    function _effectiveWeight(uint64 id, uint64 atEpoch) internal view returns (int256 w) {
-        w = _clampWeight(_streams[id].weightRecord, atEpoch);
-        if (_pendingExists[id][PendingOp.SET_WEIGHT]) {
-            int256 pw = _clampWeight(_pending[id][PendingOp.SET_WEIGHT].weightRecord, atEpoch);
-            if (pw > w) w = pw;
+    function _copy(ProjectedStream[] memory live, uint256 n) private pure returns (ProjectedStream[] memory out) {
+        out = new ProjectedStream[](live.length);
+        for (uint256 i = 0; i < n; i++) {
+            out[i] = ProjectedStream({id: live[i].id, record: live[i].record});
         }
-        if (_pendingExists[id][PendingOp.STEP_WEIGHT]) {
-            int256 pw = _clampWeight(_pending[id][PendingOp.STEP_WEIGHT].weightRecord, atEpoch);
-            if (pw > w) w = pw;
+    }
+
+    uint256 private constant NEW_ENTRY = type(uint256).max;
+
+    /// @dev Applies one queued write to a copy of the projection. False when it cannot apply,
+    /// which is how a weight batch naming an already-removed stream drops.
+    function _applyToProjection(ProjectedStream[] memory live, uint256 n, uint256 idx, NewWrite memory nw)
+        private
+        view
+        returns (ProjectedStream[] memory out, uint256 count, bool ok)
+    {
+        out = _copy(live, n);
+        count = n;
+
+        bool isNew = idx == NEW_ENTRY;
+        PendingOp op = isNew ? nw.op : _pendingKeys[idx].op;
+        uint64 id = isNew ? nw.id : _pendingKeys[idx].id;
+
+        if (op == PendingOp.REGISTER) {
+            WeightRecord memory rec = isNew ? nw.record : _pending[id][PendingOp.REGISTER].weightRecord;
+            out[count++] = ProjectedStream({id: id, record: rec});
+            return (out, count, true);
         }
+        if (op == PendingOp.REMOVE) {
+            for (uint256 i = 0; i < count; i++) {
+                if (out[i].id != id) continue;
+                out[i] = out[count - 1];
+                return (out, count - 1, true);
+            }
+            return (out, count, false); // nothing left to remove
+        }
+        if (op == PendingOp.SET_DISTRIBUTION) {
+            return (out, count, true); // no effect on the schedule
+        }
+
+        uint64[] memory ids = isNew ? nw.batchIds : _pendingWeight[op].ids;
+        WeightRecord[] memory records;
+        if (isNew) {
+            records = nw.batchRecords;
+        } else {
+            records = new WeightRecord[](ids.length);
+            for (uint256 i = 0; i < ids.length; i++) {
+                records[i] = _pendingWeight[op].records[i];
+            }
+        }
+        for (uint256 i = 0; i < ids.length; i++) {
+            bool found;
+            for (uint256 j = 0; j < count; j++) {
+                if (out[j].id != ids[i]) continue;
+                out[j].record = records[i];
+                found = true;
+                break;
+            }
+            if (!found) return (out, count, false);
+        }
+        return (out, count, true);
+    }
+
+    function _entryEpoch(uint256 idx, NewWrite memory nw) private view returns (uint64) {
+        if (idx == NEW_ENTRY) return nw.effectiveEpoch;
+        PendingKey memory k = _pendingKeys[idx];
+        return k.hasId ? _pending[k.id][k.op].effectiveEpoch : _pendingWeight[k.op].effectiveEpoch;
+    }
+
+    /// @dev By effective epoch; a write queued now sorts last among equal epochs, as f02's
+    /// push-then-stable-sort does.
+    function _orderQueue(NewWrite memory nw) private view returns (uint256[] memory order) {
+        uint256 total = _pendingKeys.length + (nw.present ? 1 : 0);
+        order = new uint256[](total);
+        for (uint256 i = 0; i < _pendingKeys.length; i++) {
+            order[i] = i;
+        }
+        if (nw.present) order[total - 1] = NEW_ENTRY;
+
+        for (uint256 i = 1; i < total; i++) {
+            uint256 cur = order[i];
+            uint64 e = _entryEpoch(cur, nw);
+            uint256 j = i;
+            while (j > 0 && _entryEpoch(order[j - 1], nw) > e) {
+                order[j] = order[j - 1];
+                j--;
+            }
+            order[j] = cur;
+        }
+    }
+
+    function _keyOf(uint256 idx, NewWrite memory nw) private view returns (uint256) {
+        if (idx == NEW_ENTRY) return _slotKey(nw.hasId, nw.id, nw.op);
+        PendingKey memory k = _pendingKeys[idx];
+        return _slotKey(k.hasId, k.id, k.op);
+    }
+
+    /// @dev Walks the queue, dropping entries that no longer validate, and reports what survived.
+    function _walk(NewWrite memory nw)
+        private
+        view
+        returns (uint256[] memory accepted, uint256 count, bool newAccepted)
+    {
+        uint256[] memory order = _orderQueue(nw);
+        accepted = new uint256[](order.length);
+
+        (ProjectedStream[] memory live, uint256 n) = _settledProjection();
+        if (!_scheduleValid(live, n, uint64(block.number))) return (accepted, 0, false);
+
+        for (uint256 i = 0; i < order.length; i++) {
+            (ProjectedStream[] memory candidate, uint256 cn, bool ok) = _applyToProjection(live, n, order[i], nw);
+            if (!ok || !_scheduleValid(candidate, cn, _entryEpoch(order[i], nw))) continue;
+            live = candidate;
+            n = cn;
+            accepted[count++] = _keyOf(order[i], nw);
+            if (order[i] == NEW_ENTRY) newAccepted = true;
+        }
+    }
+
+    /// @dev Whether a due write still holds against the settled state it is about to change.
+    function _stillValid(uint256 idx, uint64 nowEpoch) private view returns (bool) {
+        NewWrite memory none;
+        (ProjectedStream[] memory live, uint256 n) = _settledProjection();
+        (ProjectedStream[] memory candidate, uint256 cn, bool ok) = _applyToProjection(live, n, idx, none);
+        return ok && _scheduleValid(candidate, cn, nowEpoch);
+    }
+
+    /// @dev Whether f02 admits this write: it must survive its own position, and cost no
+    /// surviving entry its place.
+    function _admits(NewWrite memory nw) private view returns (bool) {
+        NewWrite memory none;
+        (uint256[] memory before, uint256 bn,) = _walk(none);
+        (uint256[] memory later, uint256 ln, bool newAccepted) = _walk(nw);
+        if (!newAccepted) return false;
+        for (uint256 i = 0; i < bn; i++) {
+            bool kept;
+            for (uint256 j = 0; j < ln; j++) {
+                if (later[j] != before[i]) continue;
+                kept = true;
+                break;
+            }
+            if (!kept) return false;
+        }
+        return true;
+    }
+
+    /// @dev Encodes a queue slot so the two walks' accepted sets can be compared.
+    function _slotKey(bool hasId, uint64 id, PendingOp op) private pure returns (uint256) {
+        return hasId ? (uint256(id) << 8) | uint256(op) : (uint256(1) << 72) | uint256(op);
     }
 
     function _pendingRegistrationCount() internal view returns (uint256 count) {
@@ -1010,13 +1280,13 @@ contract FVMRewardActor {
     function _queueWrite(uint64 id, PendingOp op, Pending memory p) internal {
         _pending[id][op] = p;
         _pendingExists[id][op] = true;
-        _pendingKeys.push(PendingKey({id: id, op: op}));
+        _pendingKeys.push(PendingKey({hasId: true, id: id, op: op}));
         if (p.effectiveEpoch < nextTransitionEpoch) nextTransitionEpoch = p.effectiveEpoch;
     }
 
-    function _removePendingKey(uint64 id, PendingOp op) internal {
+    function _removePendingKey(bool hasId, uint64 id, PendingOp op) internal {
         for (uint256 i = 0; i < _pendingKeys.length; i++) {
-            if (_pendingKeys[i].id == id && _pendingKeys[i].op == op) {
+            if (_pendingKeys[i].hasId == hasId && _pendingKeys[i].id == id && _pendingKeys[i].op == op) {
                 _swapRemove(_pendingKeys, i);
                 return;
             }
@@ -1038,7 +1308,8 @@ contract FVMRewardActor {
     function _recomputeNextTransition() internal {
         uint64 best = type(uint64).max;
         for (uint256 i = 0; i < _pendingKeys.length; i++) {
-            uint64 e = _pending[_pendingKeys[i].id][_pendingKeys[i].op].effectiveEpoch;
+            PendingKey memory k = _pendingKeys[i];
+            uint64 e = k.hasId ? _pending[k.id][k.op].effectiveEpoch : _pendingWeight[k.op].effectiveEpoch;
             if (e < best) best = e;
         }
         nextTransitionEpoch = best;
@@ -1112,7 +1383,7 @@ contract FVMRewardActor {
             uint64 bestId = 0;
             for (uint256 i = 0; i < _pendingKeys.length; i++) {
                 PendingKey memory k = _pendingKeys[i];
-                uint64 e = _pending[k.id][k.op].effectiveEpoch;
+                uint64 e = k.hasId ? _pending[k.id][k.op].effectiveEpoch : _pendingWeight[k.op].effectiveEpoch;
                 if (e > nowEpoch) continue;
                 if (!found || e < bestEpoch || (e == bestEpoch && k.id < bestId)) {
                     found = true;
@@ -1124,9 +1395,30 @@ contract FVMRewardActor {
             if (!found) break;
 
             PendingKey memory key = _pendingKeys[bestIdx];
-            _apply(key.id, key.op);
-            delete _pending[key.id][key.op];
-            _pendingExists[key.id][key.op] = false;
+            // Admission checked this write against the queue as it stood then. A cancellation since
+            // can have taken away what it depended on, so it is checked again here and dropped if
+            // it no longer holds.
+            if (!_stillValid(bestIdx, nowEpoch)) {
+                emit PendingDropped(key.id, key.op);
+                if (key.hasId) {
+                    delete _pending[key.id][key.op];
+                    _pendingExists[key.id][key.op] = false;
+                    delete _pendingShares[key.id];
+                } else {
+                    delete _pendingWeight[key.op];
+                    _pendingWeightExists[key.op] = false;
+                }
+                _pendingKeys[bestIdx] = _pendingKeys[_pendingKeys.length - 1];
+                _pendingKeys.pop();
+                continue;
+            }
+            if (key.hasId) {
+                _apply(key.id, key.op);
+                delete _pending[key.id][key.op];
+                _pendingExists[key.id][key.op] = false;
+            } else {
+                _applyWeightBatch(key.op);
+            }
             _pendingKeys[bestIdx] = _pendingKeys[_pendingKeys.length - 1];
             _pendingKeys.pop();
         }
@@ -1147,8 +1439,6 @@ contract FVMRewardActor {
             }
             delete _pendingShares[id];
             _streamIds.push(id);
-        } else if (op == PendingOp.SET_WEIGHT || op == PendingOp.STEP_WEIGHT) {
-            _streams[id].weightRecord = p.weightRecord;
         } else if (op == PendingOp.SET_DISTRIBUTION) {
             Stream storage s = _streams[id];
             _foldAndBurnResidue(s);
@@ -1156,6 +1446,17 @@ contract FVMRewardActor {
         } else if (op == PendingOp.REMOVE) {
             _applyRemove(id);
         }
+    }
+
+    /// @dev A weight batch applies as one unit: every record in it lands, or the whole entry is
+    /// still queued. That is what makes the slot schedule-wide rather than per stream.
+    function _applyWeightBatch(PendingOp op) internal {
+        WeightBatch storage batch = _pendingWeight[op];
+        for (uint256 i = 0; i < batch.ids.length; i++) {
+            _streams[batch.ids[i]].weightRecord = batch.records[i];
+        }
+        delete _pendingWeight[op];
+        _pendingWeightExists[op] = false;
     }
 
     function _applyRemove(uint64 id) internal {

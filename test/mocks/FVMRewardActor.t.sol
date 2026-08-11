@@ -95,6 +95,8 @@ contract RewardCaller {
 contract FVMRewardActorTest is MockRewardTest {
     using FVMPay for uint64;
 
+    event PendingDropped(uint64 indexed streamId, PendingOp op);
+
     RewardCaller swaCaller;
     RewardCaller writerCaller;
     RewardCaller otherWriterCaller;
@@ -345,6 +347,13 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(exitCode, USR_ILLEGAL_ARGUMENT);
     }
 
+    // Zero is reserved and could come to signify the burn stream.
+    function test_RegisterStream_ZeroId_IllegalArgument() public {
+        assertEq(
+            _registerStream(0, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT
+        );
+    }
+
     function test_RegisterStream_DuplicateId_IllegalArgument() public {
         assertEq(_registerStream(SERVICE_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
         assertEq(
@@ -354,10 +363,10 @@ contract FVMRewardActorTest is MockRewardTest {
     }
 
     function test_RegisterStream_AtMaxStreams_IllegalArgument() public {
-        for (uint64 i = 0; i < MAX_STREAMS; i++) {
+        for (uint64 i = 1; i <= MAX_STREAMS; i++) {
             assertEq(_registerStream(i, _constantRecord(0), DistributionKind.IMPLICIT, address(0)), 0);
         }
-        uint64 oneMoreId = MAX_STREAMS;
+        uint64 oneMoreId = MAX_STREAMS + 1;
         assertEq(
             _registerStream(oneMoreId, _constantRecord(0), DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT
         );
@@ -743,8 +752,48 @@ contract FVMRewardActorTest is MockRewardTest {
 
     // Cancelling a slot with nothing queued must succeed as a no-op, not error.
     function test_CancelPending_EmptySlot_BenignNoOp() public {
-        uint32 exitCode = swaCaller.cancelPending(SERVICE_ID, PendingOp.SET_WEIGHT);
-        assertEq(exitCode, 0);
+        assertEq(swaCaller.cancelPending(SERVICE_ID, PendingOp.REGISTER), 0);
+        assertEq(swaCaller.cancelPendingWeight(PendingOp.SET_WEIGHT), 0);
+    }
+
+    // The two weight ops hold one schedule-wide slot each and are addressed with a null id; every
+    // other op names its stream. Neither is reachable through the other's shape.
+    function test_CancelPending_ShapeMismatch_IllegalArgument() public {
+        assertEq(swaCaller.cancelPending(SERVICE_ID, PendingOp.SET_WEIGHT), USR_ILLEGAL_ARGUMENT);
+        assertEq(swaCaller.cancelPendingWeight(PendingOp.REGISTER), USR_ILLEGAL_ARGUMENT);
+    }
+
+    // The slot is the whole schedule, not one stream's share of it, so a pending batch blocks the
+    // next one even when the two name entirely different streams.
+    function test_SetWeightRecords_PendingBatchBlocksAnotherStream() public {
+        _registerExplicit(SERVICE_ID, address(writerCaller));
+        assertEq(_registerStream(CONSENSUS_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
+        _warpPastTimelockAndSettle();
+
+        assertEq(_setWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.2e18)), 0);
+        assertEq(
+            _setWeightRecords(swaCaller, CONSENSUS_ID, _constantRecord(0.2e18)),
+            USR_ILLEGAL_ARGUMENT,
+            "one weight slot for the whole schedule"
+        );
+    }
+
+    // A batch applies as one unit, so both streams move at the same epoch or neither does.
+    function test_SetWeightRecords_BatchAppliesAsOneEntry() public {
+        _registerExplicit(SERVICE_ID, address(writerCaller));
+        assertEq(_registerStream(CONSENSUS_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
+        _warpPastTimelockAndSettle();
+
+        WeightRecordUpdate[] memory updates = new WeightRecordUpdate[](2);
+        updates[0] = WeightRecordUpdate({id: SERVICE_ID, record: _constantRecord(0.3e18)});
+        updates[1] = WeightRecordUpdate({id: CONSENSUS_ID, record: _constantRecord(0.4e18)});
+        assertEq(swaCaller.setWeightRecords(updates), 0);
+        assertEq(_getState().pendingWrites.length, 1, "a batch is one queue entry");
+
+        _warpPastTimelockAndSettle();
+        StreamView[] memory streams = _streams();
+        assertEq(streams[0].weightRecord.vStart, 0.3e18);
+        assertEq(streams[1].weightRecord.vStart, 0.4e18);
     }
 
     function test_CancelPending_DiscardsQueuedSetWeightRecords() public {
@@ -752,7 +801,7 @@ contract FVMRewardActorTest is MockRewardTest {
         uint32 setExit = _setWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.9e18));
         assertEq(setExit, 0);
 
-        uint32 cancelExit = swaCaller.cancelPending(SERVICE_ID, PendingOp.SET_WEIGHT);
+        uint32 cancelExit = swaCaller.cancelPendingWeight(PendingOp.SET_WEIGHT);
         assertEq(cancelExit, 0);
 
         _warpPastTimelockAndSettle();
@@ -802,12 +851,143 @@ contract FVMRewardActorTest is MockRewardTest {
         uint32 stepExit = _stepWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.6e18));
         assertEq(stepExit, 0);
 
-        uint32 cancelExit = swaCaller.cancelPending(SERVICE_ID, PendingOp.SET_WEIGHT);
+        uint32 cancelExit = swaCaller.cancelPendingWeight(PendingOp.SET_WEIGHT);
         assertEq(cancelExit, 0);
 
         _warpPastTimelockAndSettle();
         // SET_WEIGHT was cancelled; STEP_WEIGHT still applied.
         assertEq(_streams()[0].weightRecord.vStart, 0.6e18);
+    }
+
+    // -------------------------------------------------------------------------
+    // Projected-schedule validation
+    // -------------------------------------------------------------------------
+
+    /// @dev Registers two implicit streams at `a` and `b` and settles them.
+    function _twoStreams(int256 a, int256 b) internal {
+        assertEq(_registerStream(SERVICE_ID, _constantRecord(a), DistributionKind.IMPLICIT, address(0)), 0);
+        assertEq(_registerStream(CONSENSUS_ID, _constantRecord(b), DistributionKind.IMPLICIT, address(0)), 0);
+        _warpPastTimelockAndSettle();
+    }
+
+    // The sum is checked at every breakpoint from the effective epoch onward, not just at it. This
+    // schedule is comfortably under one when it lands and breaches only as the ramp reaches its cap.
+    function test_Schedule_RampBreachingAfterItLands_IllegalArgument() public {
+        _twoStreams(0.5e18, 0.1e18);
+        WeightRecord memory ramp = _record(0.1e18, 1e12, uint64(block.number), 0, 0.9e18);
+        assertEq(_setWeightRecords(swaCaller, CONSENSUS_ID, ramp), USR_ILLEGAL_ARGUMENT);
+    }
+
+    // The same ramp, capped so the sum tops out at exactly one, is admitted: the check rejects
+    // schedules that breach, not schedules that slope.
+    function test_Schedule_RampReachingExactlyOne_Accepted() public {
+        _twoStreams(0.5e18, 0.1e18);
+        WeightRecord memory ramp = _record(0.1e18, 1e12, uint64(block.number), 0, 0.5e18);
+        assertEq(_setWeightRecords(swaCaller, CONSENSUS_ID, ramp), 0);
+    }
+
+    // Admission projects the queue, so a stream a pending removal will have taken away is not
+    // there to be weighted.
+    function test_Schedule_WeightWriteForARemovedStream_IllegalArgument() public {
+        _twoStreams(0.4e18, 0.2e18);
+        assertEq(swaCaller.removeStream(CONSENSUS_ID), 0);
+        assertEq(_setWeightRecords(swaCaller, CONSENSUS_ID, _constantRecord(0.3e18)), USR_ILLEGAL_ARGUMENT);
+    }
+
+    // Reject-on-strand. The registration is queued far enough out that the weight write lands
+    // first; raising the live stream would leave no room for it, costing an already-accepted entry
+    // its place, so the weight write is refused rather than silently stranding it.
+    function test_Schedule_WriteThatStrandsAQueuedRegistration_IllegalArgument() public {
+        assertEq(_registerStream(SERVICE_ID, _constantRecord(0.4e18), DistributionKind.IMPLICIT, address(0)), 0);
+        _warpPastTimelockAndSettle();
+
+        uint32 registered = swaCaller.registerStream(
+            CONSENSUS_ID, _constantRecord(0.5e18), address(0), new Share[](0), uint64(block.number) + 100_000
+        );
+        assertEq(registered, 0);
+
+        assertEq(
+            _setWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.9e18)),
+            USR_ILLEGAL_ARGUMENT,
+            "must not strand the queued registration"
+        );
+        // The same write with room left for the registration is fine.
+        assertEq(_setWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.5e18)), 0);
+    }
+
+    // Admission checked this registration against a queue that included the removal. Cancelling
+    // the removal takes away the room it depended on, so it is dropped at settle rather than
+    // applied into a schedule that sums above one.
+    function test_Settle_DropsAWriteACancellationStranded() public {
+        assertEq(_registerStream(SERVICE_ID, _constantRecord(0.4e18), DistributionKind.IMPLICIT, address(0)), 0);
+        _warpPastTimelockAndSettle();
+
+        assertEq(swaCaller.removeStream(SERVICE_ID), 0);
+        uint64 activation = uint64(block.number) + SWA_TIMELOCK + 10;
+        uint32 registered =
+            swaCaller.registerStream(CONSENSUS_ID, _constantRecord(0.9e18), address(0), new Share[](0), activation);
+        assertEq(registered, 0, "room exists while the removal is queued");
+
+        assertEq(swaCaller.cancelPending(SERVICE_ID, PendingOp.REMOVE), 0);
+        vm.roll(activation);
+
+        // The event is the assertion that matters: an absent stream is equally consistent with the
+        // write never having been reached, whereas this pins that it was reached and dropped.
+        vm.expectEmit(true, false, false, true, REWARD_ACTOR_ADDRESS);
+        emit PendingDropped(CONSENSUS_ID, PendingOp.REGISTER);
+        rewardActor().mockSettle();
+
+        StreamView[] memory streams = _streams();
+        assertEq(streams.length, 1, "the stranded registration must not apply");
+        assertEq(streams[0].id, SERVICE_ID);
+    }
+
+    // The peak here is transient: one epoch wide, at the epoch after the computed clamp crossing,
+    // and lower both before it and at the end of the domain. Only the neighbours either side of a
+    // crossing put a sample on it.
+    function test_Schedule_TransientPeakAtACrossingNeighbour_IllegalArgument() public {
+        _twoStreams(0.1e18, 0.1e18);
+        uint64 f = uint64(block.number) + SWA_TIMELOCK;
+
+        WeightRecordUpdate[] memory updates = new WeightRecordUpdate[](2);
+        // Rises 3 per epoch to a cap of 11, so 11/3 truncates to 3 but the cap lands at 4.
+        updates[0] = WeightRecordUpdate({id: SERVICE_ID, record: _record(0, 3, f, 0, 11)});
+        // Falls 1 per epoch from just under the limit.
+        updates[1] = WeightRecordUpdate({id: CONSENSUS_ID, record: _record(WAD - 6, -1, f, 0, WAD - 6)});
+
+        assertEq(swaCaller.setWeightRecords(updates), USR_ILLEGAL_ARGUMENT);
+    }
+
+    // A falling ramp selects the floor as its crossing bound rather than the cap.
+    function test_Schedule_FallingRamp() public {
+        _twoStreams(0.5e18, 0.1e18);
+        uint64 f = uint64(block.number) + SWA_TIMELOCK;
+        assertEq(
+            _setWeightRecords(swaCaller, CONSENSUS_ID, _record(0.5e18, -1e12, f, 0.1e18, 0.5e18)),
+            0,
+            "starts at the limit and only falls"
+        );
+        assertEq(
+            _setWeightRecords(swaCaller, CONSENSUS_ID, _record(0.51e18, -1e12, f, 0.1e18, 0.51e18)),
+            USR_ILLEGAL_ARGUMENT,
+            "starts above it"
+        );
+    }
+
+    // An anchor after the validation start: the weight sits at its floor until then and steps up,
+    // so the breach is at the anchor rather than anywhere the ramp reaches.
+    function test_Schedule_AnchorAfterTheStart_IllegalArgument() public {
+        _twoStreams(0.5e18, 0.1e18);
+        uint64 later = uint64(block.number) + SWA_TIMELOCK + 200_000;
+        assertEq(
+            _setWeightRecords(swaCaller, CONSENSUS_ID, _record(0.9e18, 1e12, later, 0.1e18, 0.9e18)),
+            USR_ILLEGAL_ARGUMENT
+        );
+        assertEq(
+            _setWeightRecords(swaCaller, CONSENSUS_ID, _record(0.5e18, 1e12, later, 0.1e18, 0.5e18)),
+            0,
+            "the same shape with room for it"
+        );
     }
 
     function test_Claim_NonexistentStream_NotFound() public {
