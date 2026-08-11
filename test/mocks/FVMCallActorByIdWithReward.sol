@@ -4,17 +4,15 @@ pragma solidity ^0.8.36;
 import {Vm} from "forge-std/Vm.sol";
 
 import {CALL_ACTOR_BY_ID} from "fvm-solidity/FVMPrecompiles.sol";
-import {REWARD_ACTOR_ID} from "fvm-solidity/FVMActors.sol";
+import {REWARD_ACTOR_ID, REWARD_ACTOR_ADDRESS} from "fvm-solidity/FVMActors.sol";
 import {NO_FLAGS, READONLY_FLAG} from "fvm-solidity/FVMFlags.sol";
 import {USR_ILLEGAL_ARGUMENT} from "fvm-solidity/FVMErrors.sol";
 import {FVMCallActorById} from "fvm-solidity/mocks/FVMCallActorById.sol";
 
-import {FVMRewardActor} from "./FVMRewardActor.sol";
-
 /// @notice Extends fvm-solidity's CALL_ACTOR_BY_ID mock with a branch for REWARD_ACTOR_ID (f02).
-/// @dev Serves calls addressed to f02 from FVMRewardActor and forwards every other actor id,
-///      unmodified, to an FVMCallActorById deployed at construction, leaving burn, power, datacap
-///      and miner behaviour with fvm-solidity.
+/// @dev Serves calls addressed to f02 by raw-selector routing to whichever mock is etched at
+///      REWARD_ACTOR_ADDRESS, so callers can swap it without a typed dependency. Forwards every
+///      other actor id, unmodified, to an FVMCallActorById deployed at construction.
 /// @dev That forward is a `delegatecall` and must stay one. It preserves `address(this)` and
 ///      `msg.sender` as the original caller through to FVMCallActorById's `_handleBurn`, which
 ///      debits `address(this).balance`; under `call` the debit lands on this contract instead.
@@ -22,11 +20,9 @@ import {FVMRewardActor} from "./FVMRewardActor.sol";
 ///      after MockFVMTest.setUp() has run.
 contract FVMCallActorByIdWithReward {
     address private immutable BASE;
-    FVMRewardActor private immutable REWARD;
 
-    constructor(Vm vm, FVMRewardActor reward) {
+    constructor(Vm vm) {
         BASE = address(new FVMCallActorById(vm));
-        REWARD = reward;
     }
 
     fallback() external payable {
@@ -47,9 +43,10 @@ contract FVMCallActorByIdWithReward {
                 // None of the reward actor's methods accept a value; reject rather than drop it.
                 response = abi.encode(USR_ILLEGAL_ARGUMENT, uint64(0), bytes(""));
             } else {
-                (uint32 exitCode, uint64 outCodec, bytes memory rewardRet) =
-                    REWARD.handle_filecoin_method(method, codec, params);
-                response = abi.encode(exitCode, outCodec, rewardRet);
+                (bool rewardOk, bytes memory rewardRet) = REWARD_ACTOR_ADDRESS.call(
+                    abi.encodeWithSignature("handle_filecoin_method(uint64,uint64,bytes)", method, codec, params)
+                );
+                response = rewardOk ? rewardRet : abi.encode(USR_ILLEGAL_ARGUMENT, uint64(0), bytes(""));
             }
             assembly ("memory-safe") {
                 return(add(response, 0x20), mload(response))

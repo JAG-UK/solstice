@@ -23,14 +23,15 @@ import {
     MAX_RECIPIENTS,
     SHARE_TOTAL
 } from "./FVMRewardActor.sol";
-import {STEP_WEIGHT_RECORDS, CLAIM, SWA_TIMELOCK} from "../../src/lib/FVMRewardMethod.sol";
+import {CLAIM, SWA_TIMELOCK} from "../../src/lib/FVMRewardMethod.sol";
 import {FVMRewards} from "../../src/lib/FVMRewards.sol";
+import {WeightRecordUpdate} from "../../src/lib/FVMRewardTypes.sol";
 
 /// @dev A distinct external caller, so tests can check authorization by identity rather than
 /// by happenstance of who the test contract is. The typed methods below go through FVMRewards
 /// itself (production code, not a hand-rolled duplicate encoder) so these tests double as
-/// FVMRewards<->mock wire-format coverage. `call` serves StepWeightRecords, which has no library
-/// wrapper, and tests that send malformed params on purpose.
+/// FVMRewards<->mock wire-format coverage. `call` serves tests that send malformed params on
+/// purpose.
 contract RewardCaller {
     function call(uint64 method, bytes memory params) external returns (uint32 exitCode, bytes memory data) {
         bytes memory callData = abi.encode(method, uint256(0), NO_FLAGS, uint64(0), params, REWARD_ACTOR_ID);
@@ -39,30 +40,45 @@ contract RewardCaller {
         (exitCode,, data) = abi.decode(ret, (uint32, uint64, bytes));
     }
 
+    function registerStream(uint64 id, WeightRecord memory record, uint64 activationEpoch)
+        external
+        returns (uint32 exitCode)
+    {
+        exitCode = uint32(uint256(FVMRewards.tryRegisterStream(id, record, activationEpoch)));
+    }
+
     function registerStream(
         uint64 id,
         WeightRecord memory record,
-        DistributionKind kind,
         address writer,
+        Share[] memory shares,
         uint64 activationEpoch
     ) external returns (uint32 exitCode) {
-        exitCode = uint32(uint256(FVMRewards.tryRegisterStream(id, record, kind, writer, activationEpoch)));
+        exitCode = uint32(uint256(FVMRewards.tryRegisterStream(id, record, writer, shares, activationEpoch)));
     }
 
     function removeStream(uint64 id) external returns (uint32 exitCode) {
         exitCode = uint32(uint256(FVMRewards.tryRemoveStream(id)));
     }
 
-    function setWeightRecords(uint64[] memory ids, WeightRecord[] memory records) external returns (uint32 exitCode) {
-        exitCode = uint32(uint256(FVMRewards.trySetWeightRecords(ids, records)));
+    function setWeightRecords(WeightRecordUpdate[] memory updates) external returns (uint32 exitCode) {
+        exitCode = uint32(uint256(FVMRewards.trySetWeightRecords(updates)));
     }
 
-    function setDistribution(uint64 id, DistributionKind kind, address writer) external returns (uint32 exitCode) {
-        exitCode = uint32(uint256(FVMRewards.trySetDistribution(id, kind, writer)));
+    function stepWeightRecords(WeightRecordUpdate[] memory updates) external returns (uint32 exitCode) {
+        exitCode = uint32(uint256(FVMRewards.tryStepWeightRecords(updates)));
+    }
+
+    function setDistribution(uint64 id, address writer) external returns (uint32 exitCode) {
+        exitCode = uint32(uint256(FVMRewards.trySetDistribution(id, writer)));
     }
 
     function cancelPending(uint64 id, PendingOp op) external returns (uint32 exitCode) {
         exitCode = uint32(uint256(FVMRewards.tryCancelPending(id, op)));
+    }
+
+    function cancelPendingWeight(PendingOp op) external returns (uint32 exitCode) {
+        exitCode = uint32(uint256(FVMRewards.tryCancelPendingWeight(op)));
     }
 
     function setShares(uint64 id, Share[] memory shares) external returns (uint32 exitCode) {
@@ -123,28 +139,33 @@ contract FVMRewardActorTest is MockRewardTest {
         return _record(w, 0, 0, 0, WAD);
     }
 
+    /// @dev f02 requires an explicit stream to carry a valid share map at registration, so this
+    /// supplies a placeholder. Tests that care about the map install their own.
     function _registerStream(uint64 id, WeightRecord memory record, DistributionKind kind, address writer)
         internal
         returns (uint32)
     {
-        return swaCaller.registerStream(id, record, kind, writer, uint64(block.number) + SWA_TIMELOCK);
+        uint64 activation = uint64(block.number) + SWA_TIMELOCK;
+        if (kind == DistributionKind.IMPLICIT) return swaCaller.registerStream(id, record, activation);
+        return swaCaller.registerStream(id, record, writer, _shares(RECIPIENT_A, SHARE_TOTAL), activation);
     }
 
-    /// @dev Bundles a single id/record into the arrays SetWeightRecords batches over.
+    /// @dev Bundles a single id/record into the batch SetWeightRecords takes.
     function _singleWeightRecord(uint64 id, WeightRecord memory record)
         internal
         pure
-        returns (uint64[] memory ids, WeightRecord[] memory records)
+        returns (WeightRecordUpdate[] memory updates)
     {
-        ids = new uint64[](1);
-        ids[0] = id;
-        records = new WeightRecord[](1);
-        records[0] = record;
+        updates = new WeightRecordUpdate[](1);
+        updates[0] = WeightRecordUpdate({id: id, record: record});
     }
 
     function _setWeightRecords(RewardCaller caller, uint64 id, WeightRecord memory record) internal returns (uint32) {
-        (uint64[] memory ids, WeightRecord[] memory records) = _singleWeightRecord(id, record);
-        return caller.setWeightRecords(ids, records);
+        return caller.setWeightRecords(_singleWeightRecord(id, record));
+    }
+
+    function _stepWeightRecords(RewardCaller caller, uint64 id, WeightRecord memory record) internal returns (uint32) {
+        return caller.stepWeightRecords(_singleWeightRecord(id, record));
     }
 
     function _registerExplicit(uint64 id, address writer) internal {
@@ -205,9 +226,7 @@ contract FVMRewardActorTest is MockRewardTest {
 
         // _registerStream hardcodes SWA_TIMELOCK, not the override, so call directly with a
         // 10-epoch activation instead.
-        uint32 exitCode = swaCaller.registerStream(
-            SERVICE_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0), uint64(block.number) + 10
-        );
+        uint32 exitCode = swaCaller.registerStream(SERVICE_ID, _constantRecord(0.1e18), uint64(block.number) + 10);
         assertEq(exitCode, 0);
 
         vm.roll(block.number + 10);
@@ -273,24 +292,14 @@ contract FVMRewardActorTest is MockRewardTest {
     }
 
     function test_RegisterStream_NotSwa_Forbidden() public {
-        uint32 exitCode = randomCaller.registerStream(
-            SERVICE_ID,
-            _constantRecord(0.1e18),
-            DistributionKind.IMPLICIT,
-            address(0),
-            uint64(block.number) + SWA_TIMELOCK
-        );
+        uint32 exitCode =
+            randomCaller.registerStream(SERVICE_ID, _constantRecord(0.1e18), uint64(block.number) + SWA_TIMELOCK);
         assertEq(exitCode, USR_FORBIDDEN);
     }
 
     function test_RegisterStream_ActivationTooSoon_IllegalArgument() public {
-        uint32 exitCode = swaCaller.registerStream(
-            SERVICE_ID,
-            _constantRecord(0.1e18),
-            DistributionKind.IMPLICIT,
-            address(0),
-            uint64(block.number) + SWA_TIMELOCK - 1
-        );
+        uint32 exitCode =
+            swaCaller.registerStream(SERVICE_ID, _constantRecord(0.1e18), uint64(block.number) + SWA_TIMELOCK - 1);
         assertEq(exitCode, USR_ILLEGAL_ARGUMENT);
     }
 
@@ -304,9 +313,12 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(_registerStream(SERVICE_ID, r, DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT);
     }
 
-    function test_RegisterStream_FloorBelowZero_IllegalArgument() public {
+    // f02 declares floor, v_start and cap as u64, so a negative one cannot be encoded rather than
+    // being sent and rejected. Solidity does not check narrowing casts, so the encoder does.
+    function test_RegisterStream_FloorBelowZero_Reverts() public {
         WeightRecord memory r = _record(0.1e18, 0, 0, -1, WAD);
-        assertEq(_registerStream(SERVICE_ID, r, DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT);
+        vm.expectRevert(abi.encodeWithSelector(FVMRewards.ValueOutOfRange.selector, int256(-1)));
+        swaCaller.registerStream(SERVICE_ID, r, uint64(block.number) + SWA_TIMELOCK);
     }
 
     // validate_weight_record pins v_start inside the clamp band. Outside it the record still
@@ -319,18 +331,18 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(_registerStream(SERVICE_ID, above, DistributionKind.IMPLICIT, address(0)), USR_ILLEGAL_ARGUMENT);
     }
 
-    function test_RegisterStream_ImplicitWithWriter_IllegalArgument() public {
-        assertEq(
-            _registerStream(SERVICE_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(writerCaller)),
-            USR_ILLEGAL_ARGUMENT
+    // f02 validates the initial map at registration, and an empty map does not sum to one. Named
+    // for what it exercises: there is no "implicit with a writer" to test, since a stream is
+    // implicit exactly when it carries no distribution.
+    function test_RegisterStream_ExplicitWithEmptyShareMap_IllegalArgument() public {
+        uint32 exitCode = swaCaller.registerStream(
+            SERVICE_ID,
+            _constantRecord(0.1e18),
+            address(writerCaller),
+            new Share[](0),
+            uint64(block.number) + SWA_TIMELOCK
         );
-    }
-
-    function test_RegisterStream_ExplicitWithoutWriter_IllegalArgument() public {
-        assertEq(
-            _registerStream(SERVICE_ID, _constantRecord(0.1e18), DistributionKind.EXPLICIT, address(0)),
-            USR_ILLEGAL_ARGUMENT
-        );
+        assertEq(exitCode, USR_ILLEGAL_ARGUMENT);
     }
 
     function test_RegisterStream_DuplicateId_IllegalArgument() public {
@@ -393,93 +405,6 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(_registerStream(SERVICE_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
     }
 
-    // -------------------------------------------------------------------------
-    // StepWeightRecords params: FVMRewards has no encoder for this method (out of scope, see
-    // src/lib/FVMRewardMethod.sol), but the mock's decode is shared with SetWeightRecords and
-    // expects the same CBOR shape ([[id...], [[vStart,slope,tStart,floor,cap]...]]), so these
-    // tests build it by hand rather than via abi.encode. Only ever exercised with a single
-    // (id, record) pair, so the array headers are hardcoded to 0x81 (length 1).
-    // -------------------------------------------------------------------------
-
-    function _cborUint64Len(uint256 v) internal pure returns (uint256) {
-        if (v < 24) return 1;
-        if (v < 0x100) return 2;
-        if (v < 0x10000) return 3;
-        if (v < 0x100000000) return 5;
-        return 9;
-    }
-
-    function _writeCborUint64(bytes memory out, uint256 pos, uint256 v) internal pure returns (uint256) {
-        if (v < 24) {
-            out[pos] = bytes1(uint8(v));
-            return pos + 1;
-        }
-        if (v < 0x100) {
-            out[pos] = 0x18;
-            out[pos + 1] = bytes1(uint8(v));
-            return pos + 2;
-        }
-        if (v < 0x10000) {
-            out[pos] = 0x19;
-            out[pos + 1] = bytes1(uint8(v >> 8));
-            out[pos + 2] = bytes1(uint8(v));
-            return pos + 3;
-        }
-        if (v < 0x100000000) {
-            out[pos] = 0x1a;
-            out[pos + 1] = bytes1(uint8(v >> 24));
-            out[pos + 2] = bytes1(uint8(v >> 16));
-            out[pos + 3] = bytes1(uint8(v >> 8));
-            out[pos + 4] = bytes1(uint8(v));
-            return pos + 5;
-        }
-        out[pos] = 0x1b;
-        for (uint256 i = 0; i < 8; i++) {
-            out[pos + 1 + i] = bytes1(uint8(v >> (8 * (7 - i))));
-        }
-        return pos + 9;
-    }
-
-    function _cborInt64Len(int256 v) internal pure returns (uint256) {
-        return _cborUint64Len(v < 0 ? uint256(-1 - v) : uint256(v));
-    }
-
-    /// @dev Writes the unsigned magnitude, then ORs the major-1 (negative) bit into the header
-    /// byte already written at `pos` -- correct for every CBOR int64 header form (inline or
-    /// 2/3/5/9-byte), since the info bits are identical between major type 0 and 1.
-    function _writeCborInt64(bytes memory out, uint256 pos, int256 v) internal pure returns (uint256) {
-        if (v >= 0) return _writeCborUint64(out, pos, uint256(v));
-        uint256 newPos = _writeCborUint64(out, pos, uint256(-1 - v));
-        out[pos] = out[pos] | 0x20;
-        return newPos;
-    }
-
-    function _cborRecordLen(WeightRecord memory r) internal pure returns (uint256) {
-        return 1 + _cborInt64Len(r.vStart) + _cborInt64Len(r.slope) + _cborUint64Len(r.tStart) + _cborInt64Len(r.floor)
-            + _cborInt64Len(r.cap);
-    }
-
-    function _writeCborRecord(bytes memory out, uint256 pos, WeightRecord memory r) internal pure returns (uint256) {
-        out[pos++] = 0x85;
-        pos = _writeCborInt64(out, pos, r.vStart);
-        pos = _writeCborInt64(out, pos, r.slope);
-        pos = _writeCborUint64(out, pos, r.tStart);
-        pos = _writeCborInt64(out, pos, r.floor);
-        pos = _writeCborInt64(out, pos, r.cap);
-        return pos;
-    }
-
-    function _setWeightParams(uint64 id, WeightRecord memory record) internal pure returns (bytes memory out) {
-        uint256 len = 2 + _cborUint64Len(id) + 1 + _cborRecordLen(record);
-        out = new bytes(len);
-        uint256 pos = 0;
-        out[pos++] = 0x82; // top-level 2-element array
-        out[pos++] = 0x81; // ids: 1-element array
-        pos = _writeCborUint64(out, pos, id);
-        out[pos++] = 0x81; // records: 1-element array
-        pos = _writeCborRecord(out, pos, record);
-    }
-
     function test_SetWeightRecords_NotSwa_Forbidden() public {
         uint32 exitCode = _setWeightRecords(randomCaller, SERVICE_ID, _constantRecord(0.1e18));
         assertEq(exitCode, USR_FORBIDDEN);
@@ -490,25 +415,15 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(exitCode, USR_NOT_FOUND);
     }
 
-    function test_SetWeightRecords_MismatchedArrayLengths_IllegalArgument() public {
-        uint64[] memory ids = new uint64[](2);
-        WeightRecord[] memory records = new WeightRecord[](1);
-        uint32 exitCode = swaCaller.setWeightRecords(ids, records);
-        assertEq(exitCode, USR_ILLEGAL_ARGUMENT);
-    }
-
     function test_SetWeightRecords_DuplicateIdInBatch_IllegalArgument() public {
         assertEq(_registerStream(SERVICE_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
         _warpPastTimelockAndSettle();
 
-        uint64[] memory ids = new uint64[](2);
-        ids[0] = SERVICE_ID;
-        ids[1] = SERVICE_ID;
-        WeightRecord[] memory records = new WeightRecord[](2);
-        records[0] = _constantRecord(0.5e18);
-        records[1] = _constantRecord(0.5e18);
+        WeightRecordUpdate[] memory updates = new WeightRecordUpdate[](2);
+        updates[0] = WeightRecordUpdate({id: SERVICE_ID, record: _constantRecord(0.5e18)});
+        updates[1] = WeightRecordUpdate({id: SERVICE_ID, record: _constantRecord(0.5e18)});
 
-        uint32 exitCode = swaCaller.setWeightRecords(ids, records);
+        uint32 exitCode = swaCaller.setWeightRecords(updates);
         assertEq(exitCode, USR_ILLEGAL_ARGUMENT, "a repeated id queues two PendingKeys for one slot");
     }
 
@@ -565,8 +480,7 @@ contract FVMRewardActorTest is MockRewardTest {
     // -------------------------------------------------------------------------
 
     function test_StepWeightRecords_NotSwa_Forbidden() public {
-        (uint32 exitCode,) =
-            randomCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.1e18)));
+        uint32 exitCode = _stepWeightRecords(randomCaller, SERVICE_ID, _constantRecord(0.1e18));
         assertEq(exitCode, USR_FORBIDDEN);
     }
 
@@ -574,7 +488,7 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(_registerStream(SERVICE_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
         _warpPastTimelockAndSettle();
 
-        (uint32 setExit,) = swaCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.15e18)));
+        uint32 setExit = _stepWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.15e18));
         assertEq(setExit, 0);
         assertEq(_streams()[0].weightRecord.vStart, 0.1e18, "must not apply before the timelock elapses");
 
@@ -587,7 +501,7 @@ contract FVMRewardActorTest is MockRewardTest {
         _warpPastTimelockAndSettle();
 
         // Both queue successfully: distinct (id, op) slots.
-        (uint32 stepExit,) = swaCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.15e18)));
+        uint32 stepExit = _stepWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.15e18));
         assertEq(stepExit, 0);
         uint32 setExit = _setWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.2e18));
         assertEq(setExit, 0);
@@ -599,11 +513,9 @@ contract FVMRewardActorTest is MockRewardTest {
         assertEq(_registerStream(SERVICE_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
         _warpPastTimelockAndSettle();
 
-        (uint32 firstExit,) =
-            swaCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.15e18)));
+        uint32 firstExit = _stepWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.15e18));
         assertEq(firstExit, 0);
-        (uint32 secondExit,) =
-            swaCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.2e18)));
+        uint32 secondExit = _stepWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.2e18));
         assertEq(secondExit, USR_ILLEGAL_ARGUMENT, "revising a pending write is cancel + requeue, not a second queue");
     }
 
@@ -761,20 +673,20 @@ contract FVMRewardActorTest is MockRewardTest {
 
     function test_SetDistribution_NotSwa_Forbidden() public {
         _registerExplicit(SERVICE_ID, address(writerCaller));
-        uint32 exitCode =
-            randomCaller.setDistribution(SERVICE_ID, DistributionKind.EXPLICIT, address(otherWriterCaller));
+        uint32 exitCode = randomCaller.setDistribution(SERVICE_ID, address(otherWriterCaller));
         assertEq(exitCode, USR_FORBIDDEN);
     }
 
-    function test_SetDistribution_ToImplicit_IllegalArgument() public {
-        _registerExplicit(SERVICE_ID, address(writerCaller));
-        uint32 exitCode = swaCaller.setDistribution(SERVICE_ID, DistributionKind.IMPLICIT, address(0));
-        assertEq(exitCode, USR_ILLEGAL_ARGUMENT);
+    // A stream's kind is fixed at registration, so an implicit stream has no writer to reassign.
+    function test_SetDistribution_ImplicitStream_IllegalArgument() public {
+        assertEq(_registerStream(CONSENSUS_ID, _constantRecord(0.1e18), DistributionKind.IMPLICIT, address(0)), 0);
+        _warpPastTimelockAndSettle();
+        assertEq(swaCaller.setDistribution(CONSENSUS_ID, address(writerCaller)), USR_ILLEGAL_ARGUMENT);
     }
 
     function test_SetDistribution_ZeroWriter_IllegalArgument() public {
         _registerExplicit(SERVICE_ID, address(writerCaller));
-        uint32 exitCode = swaCaller.setDistribution(SERVICE_ID, DistributionKind.EXPLICIT, address(0));
+        uint32 exitCode = swaCaller.setDistribution(SERVICE_ID, address(0));
         assertEq(exitCode, USR_ILLEGAL_ARGUMENT);
     }
 
@@ -785,7 +697,7 @@ contract FVMRewardActorTest is MockRewardTest {
         uint32 initialSet = writerCaller.setShares(SERVICE_ID, _shares(RECIPIENT_A, SHARE_TOTAL));
         assertEq(initialSet, 0);
 
-        uint32 distExit = swaCaller.setDistribution(SERVICE_ID, DistributionKind.EXPLICIT, address(otherWriterCaller));
+        uint32 distExit = swaCaller.setDistribution(SERVICE_ID, address(otherWriterCaller));
         assertEq(distExit, 0);
 
         // Before the timelock elapses: old writer still authorized, new writer is not.
@@ -811,7 +723,7 @@ contract FVMRewardActorTest is MockRewardTest {
 
         rewardActor().mockAwardBlockReward(1 ether); // 0.1 ether accrues under RECIPIENT_A
 
-        uint32 distExit = swaCaller.setDistribution(SERVICE_ID, DistributionKind.EXPLICIT, address(otherWriterCaller));
+        uint32 distExit = swaCaller.setDistribution(SERVICE_ID, address(otherWriterCaller));
         assertEq(distExit, 0);
         _warpPastTimelockAndSettle();
 
@@ -873,7 +785,7 @@ contract FVMRewardActorTest is MockRewardTest {
     // governance gate produced.
     function test_CancelPending_StepWeightRecords_IsRejected() public {
         _registerExplicit(SERVICE_ID, address(writerCaller));
-        (uint32 stepExit,) = swaCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.9e18)));
+        uint32 stepExit = _stepWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.9e18));
         assertEq(stepExit, 0);
 
         uint32 cancelExit = swaCaller.cancelPending(SERVICE_ID, PendingOp.STEP_WEIGHT);
@@ -887,7 +799,7 @@ contract FVMRewardActorTest is MockRewardTest {
         _registerExplicit(SERVICE_ID, address(writerCaller));
         uint32 setExit = _setWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.5e18));
         assertEq(setExit, 0);
-        (uint32 stepExit,) = swaCaller.call(STEP_WEIGHT_RECORDS, _setWeightParams(SERVICE_ID, _constantRecord(0.6e18)));
+        uint32 stepExit = _stepWeightRecords(swaCaller, SERVICE_ID, _constantRecord(0.6e18));
         assertEq(stepExit, 0);
 
         uint32 cancelExit = swaCaller.cancelPending(SERVICE_ID, PendingOp.SET_WEIGHT);

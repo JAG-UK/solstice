@@ -19,6 +19,14 @@ struct WeightRecord {
     int256 cap;
 }
 
+/// @notice One entry in a SetWeightRecords/StepWeightRecords batch.
+/// @dev Bundling the id with its record makes a batch's two lengths structurally equal -- there
+/// is no encoding for a mismatch, so none needs to be checked for.
+struct WeightRecordUpdate {
+    uint64 id;
+    WeightRecord record;
+}
+
 /// @notice One entry in an EXPLICIT stream's wallet-to-share map.
 /// @dev Shares across a stream's map must sum to SHARE_TOTAL (1e18); a single share must
 ///      therefore fit uint64.

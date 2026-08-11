@@ -70,7 +70,7 @@ struct Tombstone {
 struct Pending {
     uint64 effectiveEpoch;
     WeightRecord weightRecord; // SET_WEIGHT / STEP_WEIGHT / REGISTER payload
-    DistributionKind distributionKind; // REGISTER / SET_DISTRIBUTION payload
+    DistributionKind distributionKind; // REGISTER payload
     address writer; // REGISTER / SET_DISTRIBUTION payload
 }
 
@@ -151,6 +151,11 @@ contract FVMRewardActor {
 
     mapping(uint64 streamId => Tombstone) internal _tombstones;
     uint64[] internal _tombstoneIds;
+
+    /// @dev A queued registration's initial share map, keyed by stream id alone since a stream has
+    /// at most one pending registration. `delete _pending[id][op]` does not reach it; it is
+    /// cleared where a registration applies and where one is queued.
+    mapping(uint64 streamId => Share[]) internal _pendingShares;
 
     mapping(uint64 streamId => mapping(PendingOp => Pending)) internal _pending;
     mapping(uint64 streamId => mapping(PendingOp => bool)) internal _pendingExists;
@@ -317,17 +322,7 @@ contract FVMRewardActor {
         if (!s.exists) return (USR_NOT_FOUND, 0, "");
         if (s.kind != DistributionKind.EXPLICIT) return (USR_ILLEGAL_ARGUMENT, 0, "");
         if (msg.sender != s.writer) return (USR_FORBIDDEN, 0, "");
-        if (newShares.length > MAX_RECIPIENTS) return (USR_ILLEGAL_ARGUMENT, 0, "");
-
-        uint256 total;
-        for (uint256 i = 0; i < newShares.length; i++) {
-            if (newShares[i].share == 0) return (USR_ILLEGAL_ARGUMENT, 0, "");
-            for (uint256 j = 0; j < i; j++) {
-                if (newShares[j].wallet == newShares[i].wallet) return (USR_ILLEGAL_ARGUMENT, 0, "");
-            }
-            total += newShares[i].share;
-        }
-        if (total != SHARE_TOTAL) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        if (!_sharesValid(newShares)) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
         _foldAndBurnResidue(s);
 
@@ -403,9 +398,9 @@ contract FVMRewardActor {
 
     function _registerStream(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
         if (msg.sender != swa) return (USR_FORBIDDEN, 0, "");
-        // Params CBOR: [id, [vStart,slope,tStart,floor,cap], kind, writerOrNull, activationEpoch]
-        (uint64 id, WeightRecord memory record, DistributionKind kind, address writer, uint64 activationEpoch) =
+        (uint64 id, WeightRecord memory record, address writer, Share[] memory shares, uint64 activationEpoch) =
             _decodeRegisterStreamParams(params);
+        DistributionKind kind = writer == address(0) ? DistributionKind.IMPLICIT : DistributionKind.EXPLICIT;
 
         // Rejects any id collision it can see: a live stream, an undrained tombstone, or an
         // already-queued registration. Reuse after a tombstone fully drains is SWA discipline.
@@ -417,8 +412,11 @@ contract FVMRewardActor {
             return (USR_ILLEGAL_ARGUMENT, 0, "");
         }
         if (!_sane(record)) return (USR_ILLEGAL_ARGUMENT, 0, "");
-        // IMPLICIT is consensus-only and carries no writer; EXPLICIT always needs one.
-        if (kind == DistributionKind.IMPLICIT ? writer != address(0) : writer == address(0)) {
+        // validate_distribution_init runs the full share check at registration, so an explicit
+        // stream is never live without a payable map; an implicit one carries none at all.
+        if (kind == DistributionKind.EXPLICIT) {
+            if (!_sharesValid(shares)) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        } else if (shares.length != 0) {
             return (USR_ILLEGAL_ARGUMENT, 0, "");
         }
         if (activationEpoch < uint64(block.number) + swaTimelockEpochs) return (USR_ILLEGAL_ARGUMENT, 0, "");
@@ -426,6 +424,10 @@ contract FVMRewardActor {
         int256 sum = _sumWeightsExcluding(new uint64[](0), activationEpoch) + _clampWeight(record, activationEpoch);
         if (sum > WAD) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
+        delete _pendingShares[id];
+        for (uint256 i = 0; i < shares.length; i++) {
+            _pendingShares[id].push(shares[i]);
+        }
         _queueWrite(
             id,
             PendingOp.REGISTER,
@@ -441,7 +443,8 @@ contract FVMRewardActor {
     function _removeStream(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
         if (msg.sender != swa) return (USR_FORBIDDEN, 0, "");
         // Params CBOR: a bare uint64 (streamId), no array wrapper
-        uint64 id = _decodeBareUint64(params);
+        uint64 id;
+        (id,) = _decodeCborUint64(_calldataPos(params) + 1); // 1-element tuple header
         if (!_streams[id].exists) return (USR_NOT_FOUND, 0, "");
         if (_pendingExists[id][PendingOp.REMOVE]) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
@@ -464,11 +467,12 @@ contract FVMRewardActor {
 
     function _setDistribution(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
         if (msg.sender != swa) return (USR_FORBIDDEN, 0, "");
-        // Params CBOR: [id, kind, writerOrNull]
-        (uint64 id, DistributionKind kind, address writer) = _decodeSetDistributionParams(params);
+        (uint64 id, address writer) = _decodeSetDistributionParams(params);
         if (!_streams[id].exists) return (USR_NOT_FOUND, 0, "");
-        // Converting a stream to IMPLICIT is not permitted (IMPLICIT is consensus-only).
-        if (kind == DistributionKind.IMPLICIT || writer == address(0)) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        // Only the writer moves; a stream's kind is fixed at registration, so an implicit stream
+        // has no writer to change.
+        if (writer == address(0)) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        if (_streams[id].kind != DistributionKind.EXPLICIT) return (USR_ILLEGAL_ARGUMENT, 0, "");
         if (_pendingExists[id][PendingOp.SET_DISTRIBUTION]) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
         _queueWrite(
@@ -477,7 +481,7 @@ contract FVMRewardActor {
             Pending({
                 effectiveEpoch: uint64(block.number) + swaTimelockEpochs,
                 weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: 0, floor: 0, cap: 0}),
-                distributionKind: kind,
+                distributionKind: DistributionKind.EXPLICIT,
                 writer: writer
             })
         );
@@ -490,11 +494,26 @@ contract FVMRewardActor {
 
     function _cancelPending(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
         if (msg.sender != swa) return (USR_FORBIDDEN, 0, "");
-        // Params CBOR: [id, op]
-        (uint64 id, PendingOp op) = _decodeCancelPendingParams(params);
+        (bool hasId, uint64 id, PendingOp op) = _decodeCancelPendingParams(params);
         // StepWeightRecords is the one uncancellable op: the discretionary path must not be able
         // to revoke a governance-gated write.
         if (op == PendingOp.STEP_WEIGHT) return (USR_ILLEGAL_ARGUMENT, 0, "");
+        // A weight write is one schedule-wide entry addressed with a null id. Until the slot model
+        // matches, cancelling one clears every stream's share of that batch, which is the same
+        // observable outcome.
+        if (!hasId) {
+            if (op != PendingOp.SET_WEIGHT) return (USR_ILLEGAL_ARGUMENT, 0, "");
+            for (uint256 i = _pendingKeys.length; i > 0; i--) {
+                PendingKey memory k = _pendingKeys[i - 1];
+                if (k.op != op) continue;
+                delete _pending[k.id][op];
+                _pendingExists[k.id][op] = false;
+                _swapRemove(_pendingKeys, i - 1);
+                emit PendingCancelled(k.id, op);
+            }
+            _recomputeNextTransition();
+            return (0, 0, "");
+        }
         if (_pendingExists[id][op]) {
             delete _pending[id][op];
             _pendingExists[id][op] = false;
@@ -565,71 +584,85 @@ contract FVMRewardActor {
         pure
         returns (uint64[] memory ids, WeightRecord[] memory records)
     {
-        uint256 pos = _calldataPos(params) + 1; // skip the top-level 2-element array header
-        uint256 idsCount;
-        (idsCount, pos) = _decodeCborArrayHeader(pos);
-        ids = new uint64[](idsCount);
-        for (uint256 i = 0; i < idsCount; i++) {
+        // [[[id, record], ...]] -- the outer array is the single-field parameter tuple.
+        uint256 pos = _calldataPos(params);
+        (, pos) = _decodeCborArrayHeader(pos); // the single-field tuple wrapper
+        uint256 count;
+        (count, pos) = _decodeCborArrayHeader(pos);
+        ids = new uint64[](count);
+        records = new WeightRecord[](count);
+        for (uint256 i = 0; i < count; i++) {
+            (, pos) = _decodeCborArrayHeader(pos); // each pair's own header
             (ids[i], pos) = _decodeCborUint64(pos);
-        }
-
-        uint256 recCount;
-        (recCount, pos) = _decodeCborArrayHeader(pos);
-        records = new WeightRecord[](recCount);
-        for (uint256 i = 0; i < recCount; i++) {
-            pos += 1; // skip the per-record 5-element array header
+            pos += 1; // the record's own 5-element header is always one byte
             (records[i], pos) = _decodeWeightRecord(pos);
         }
     }
 
     function _decodeSetSharesParams(bytes calldata params) private pure returns (uint64 id, Share[] memory newShares) {
-        uint256 pos = _calldataPos(params) + 1; // skip the top-level 2-element array header
+        uint256 pos = _calldataPos(params) + 1; // 2-element tuple header
         (id, pos) = _decodeCborUint64(pos);
+        (newShares, pos) = _decodeShares(pos);
+    }
+
+    /// @dev [[recipient, share], ...]
+    function _decodeShares(uint256 pos) private pure returns (Share[] memory shares, uint256 newPos) {
         uint256 count;
         (count, pos) = _decodeCborArrayHeader(pos);
-        newShares = new Share[](count);
+        shares = new Share[](count);
         for (uint256 i = 0; i < count; i++) {
-            pos += 1; // skip the per-entry 2-element array header
+            pos += 1; // per-entry 2-element header
             address wallet;
-            (wallet, pos) = _decodeAddressOrNull(pos);
+            (wallet, pos) = _decodeAddress(pos);
             uint64 share;
             (share, pos) = _decodeCborUint64(pos);
-            newShares[i] = Share({wallet: wallet, share: share});
+            shares[i] = Share({wallet: wallet, share: share});
         }
+        newPos = pos;
     }
 
     function _decodeRegisterStreamParams(bytes calldata params)
         private
         pure
-        returns (uint64 id, WeightRecord memory record, DistributionKind kind, address writer, uint64 activationEpoch)
+        returns (uint64 id, WeightRecord memory record, address writer, Share[] memory shares, uint64 activationEpoch)
     {
-        uint256 pos = _calldataPos(params) + 1; // skip the top-level 5-element array header
+        // [id, record, [writer, shares]|null, activationEpoch]. A stream's kind is not on the
+        // wire: a present distribution is exactly what makes it explicit.
+        uint256 pos = _calldataPos(params) + 1; // 4-element tuple header
         (id, pos) = _decodeCborUint64(pos);
-        pos += 1; // skip the weight-record 5-element array header
+        pos += 1; // the record's own 5-element header
         (record, pos) = _decodeWeightRecord(pos);
-        uint64 kindOrdinal;
-        (kindOrdinal, pos) = _decodeCborUint64(pos);
-        kind = DistributionKind(kindOrdinal);
-        (writer, pos) = _decodeAddressOrNull(pos);
+        if (_isNull(pos)) {
+            pos += 1;
+            shares = new Share[](0);
+        } else {
+            pos += 1; // the distribution's 2-element header
+            (writer, pos) = _decodeAddress(pos);
+            (shares, pos) = _decodeShares(pos);
+        }
         (activationEpoch, pos) = _decodeCborUint64(pos);
     }
 
-    function _decodeSetDistributionParams(bytes calldata params)
-        private
-        pure
-        returns (uint64 id, DistributionKind kind, address writer)
-    {
-        uint256 pos = _calldataPos(params) + 1; // skip the top-level 3-element array header
+    function _decodeSetDistributionParams(bytes calldata params) private pure returns (uint64 id, address writer) {
+        uint256 pos = _calldataPos(params) + 1; // 2-element tuple header
         (id, pos) = _decodeCborUint64(pos);
-        uint64 kindOrdinal;
-        (kindOrdinal, pos) = _decodeCborUint64(pos);
-        kind = DistributionKind(kindOrdinal);
-        (writer, pos) = _decodeAddressOrNull(pos);
+        (writer, pos) = _decodeAddress(pos);
     }
 
-    function _decodeCancelPendingParams(bytes calldata params) private pure returns (uint64 id, PendingOp op) {
-        uint256 pos = _calldataPos(params) + 1; // skip the top-level 2-element array header
-        (id, pos) = _decodeCborUint64(pos);
+    function _decodeCancelPendingParams(bytes calldata params)
+        private
+        pure
+        returns (bool hasId, uint64 id, PendingOp op)
+    {
+        // [id|null, op]. The two weight operations occupy one schedule-wide slot each and are
+        // addressed with a null id; every other operation names its stream.
+        uint256 pos = _calldataPos(params) + 1; // 2-element tuple header
+        if (_isNull(pos)) {
+            pos += 1;
+        } else {
+            hasId = true;
+            (id, pos) = _decodeCborUint64(pos);
+        }
         uint64 opOrdinal;
         (opOrdinal, pos) = _decodeCborUint64(pos);
         op = PendingOp(opOrdinal);
@@ -642,15 +675,11 @@ contract FVMRewardActor {
         (count, pos) = _decodeCborArrayHeader(pos);
         wallets = new address[](count);
         for (uint256 i = 0; i < count; i++) {
-            (wallets[i], pos) = _decodeAddressOrNull(pos);
+            (wallets[i], pos) = _decodeAddress(pos);
         }
     }
 
     /// @dev Bare CBOR uint64 (no array wrapper), e.g. RemoveStream's single streamId param.
-    function _decodeBareUint64(bytes calldata params) private pure returns (uint64 v) {
-        (v,) = _decodeCborUint64(_calldataPos(params));
-    }
-
     function _decodeWeightRecord(uint256 pos) private pure returns (WeightRecord memory record, uint256 newPos) {
         int256 vStart;
         int256 slope;
@@ -728,25 +757,56 @@ contract FVMRewardActor {
         v = major == 0 ? int256(uint256(magnitude)) : -1 - int256(uint256(magnitude));
     }
 
-    /// @dev Decodes an f410 delegated address wrapped in a CBOR byte string (0x04, 0x0a, 20
-    /// bytes) at absolute calldata position `pos`, or CBOR null (address(0)) for an IMPLICIT
-    /// stream's absent writer. The address bytes are big-endian, so one `calldataload` shifted
-    /// into place reads all 20 at once.
-    function _decodeAddressOrNull(uint256 pos) private pure returns (address addr, uint256 newPos) {
+    /// @dev A Filecoin address from its CBOR byte string, in either form a contract can hold.
+    ///
+    /// Protocol 0 (a zero byte then the actor id as an unsigned LEB128 varint) becomes the masked
+    /// ID address, which is how the EVM names a Filecoin-native actor such as f099. Protocol 4
+    /// with the EAM namespace carries the twenty address bytes directly. Any other protocol is a
+    /// form no contract can name, so it decodes to the zero address and the caller rejects it.
+    function _decodeAddress(uint256 pos) private pure returns (address addr, uint256 newPos) {
+        uint256 len;
+        (len, pos) = _decodeCborByteStringHeader(pos);
+        uint256 protocol;
         assembly ("memory-safe") {
-            let b := byte(0, calldataload(pos))
-            switch b
-            case 0xf6 {
-                addr := 0
-                newPos := add(pos, 1)
+            protocol := byte(0, calldataload(pos))
+        }
+
+        if (protocol == 0) {
+            uint256 id;
+            uint256 shift;
+            for (uint256 i = 1; i < len; i++) {
+                uint256 b;
+                assembly ("memory-safe") {
+                    b := byte(0, calldataload(add(pos, i)))
+                }
+                id |= (b & 0x7f) << shift;
+                shift += 7;
             }
-            default {
-                let len := and(b, 0x1f) // 22 for f410; length is always inline
-                // header byte + [0x04, 0x0a] prefix (3 bytes), then 20 big-endian address bytes
-                addr := shr(96, calldataload(add(pos, 3)))
-                newPos := add(pos, add(1, len))
+            addr = address(uint160((uint256(0xff) << 152) | id));
+        } else if (protocol == 4 && len == 22) {
+            assembly ("memory-safe") {
+                addr := shr(96, calldataload(add(pos, 2)))
             }
         }
+        newPos = pos + len;
+    }
+
+    function _isNull(uint256 pos) private pure returns (bool isNull) {
+        assembly ("memory-safe") {
+            isNull := eq(byte(0, calldataload(pos)), 0xf6)
+        }
+    }
+
+    function _decodeCborByteStringHeader(uint256 pos) private pure returns (uint256 len, uint256 newPos) {
+        uint256 info;
+        assembly ("memory-safe") {
+            info := and(byte(0, calldataload(pos)), 0x1f)
+        }
+        if (info < 24) return (info, pos + 1);
+        assembly ("memory-safe") {
+            len := byte(0, calldataload(add(pos, 1)))
+        }
+        newPos = pos + 2;
     }
 
     /// @dev Writes a CBOR array(count) header at absolute memory position `pos`; returns the new
@@ -835,7 +895,9 @@ contract FVMRewardActor {
             out := mload(0x40)
             dataStart := add(out, 0x20)
         }
-        uint256 pos = _writeCborArrayHeader(dataStart, n);
+        // ClaimReturn is a single-field tuple, so the amounts array sits inside a 1-element array.
+        uint256 pos = _writeCborArrayHeader(dataStart, 1);
+        pos = _writeCborArrayHeader(pos, n);
         for (uint256 i = 0; i < n; i++) {
             pos = _writeCborBigInt(pos, values[i]);
         }
@@ -859,6 +921,21 @@ contract FVMRewardActor {
     /// @dev Per-record sanity required at write time: 0 <= floor <= cap <= 1.
     /// @dev validate_weight_record: floor <= v_start <= cap <= DENOM. The lower bound on floor
     /// is implicit in f02, where these three are u64; here they are signed and it is not.
+    /// @dev validate_shares: at most MAX_RECIPIENTS rows, every share nonzero, no repeated
+    /// recipient, and the whole map summing to one.
+    function _sharesValid(Share[] memory shares) internal pure returns (bool) {
+        if (shares.length > MAX_RECIPIENTS) return false;
+        uint256 total;
+        for (uint256 i = 0; i < shares.length; i++) {
+            if (shares[i].share == 0) return false;
+            for (uint256 j = 0; j < i; j++) {
+                if (shares[j].wallet == shares[i].wallet) return false;
+            }
+            total += shares[i].share;
+        }
+        return total == SHARE_TOTAL;
+    }
+
     function _sane(WeightRecord memory w) internal pure returns (bool) {
         return w.floor >= 0 && w.floor <= w.cap && w.cap <= WAD && w.vStart >= w.floor && w.vStart <= w.cap;
     }
@@ -1064,13 +1141,17 @@ contract FVMRewardActor {
             s.weightRecord = p.weightRecord;
             s.kind = p.distributionKind;
             s.writer = p.writer;
+            Share[] storage initial = _pendingShares[id];
+            for (uint256 i = 0; i < initial.length; i++) {
+                s.shares.push(initial[i]);
+            }
+            delete _pendingShares[id];
             _streamIds.push(id);
         } else if (op == PendingOp.SET_WEIGHT || op == PendingOp.STEP_WEIGHT) {
             _streams[id].weightRecord = p.weightRecord;
         } else if (op == PendingOp.SET_DISTRIBUTION) {
             Stream storage s = _streams[id];
             _foldAndBurnResidue(s);
-            s.kind = p.distributionKind;
             s.writer = p.writer;
         } else if (op == PendingOp.REMOVE) {
             _applyRemove(id);

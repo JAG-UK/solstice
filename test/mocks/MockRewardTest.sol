@@ -15,9 +15,7 @@ contract MockRewardTest is MockFVMTest {
         super.setUp();
         vm.etch(REWARD_ACTOR_ADDRESS, address(new FVMRewardActor(vm)).code);
         FVMRewardActor(REWARD_ACTOR_ADDRESS).mockInit();
-        vm.etch(
-            CALL_ACTOR_BY_ID, address(new FVMCallActorByIdWithReward(vm, FVMRewardActor(REWARD_ACTOR_ADDRESS))).code
-        );
+        vm.etch(CALL_ACTOR_BY_ID, address(new FVMCallActorByIdWithReward(vm)).code);
     }
 
     function rewardActor() internal pure returns (FVMRewardActor) {
