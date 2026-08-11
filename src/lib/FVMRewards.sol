@@ -52,12 +52,14 @@ library FVMRewards {
     // -------------------------------------------------------------------------
 
     function _u64(int256 v) private pure returns (uint256) {
-        if (v < 0 || v > int256(uint256(type(uint64).max))) revert ValueOutOfRange(v);
+        if (uint256(v) > type(uint64).max) revert ValueOutOfRange(v);
         return uint256(v);
     }
 
     function _i64(int256 v) private pure returns (int256) {
-        if (v < type(int64).min || v > type(int64).max) revert ValueOutOfRange(v);
+        unchecked {
+            if (uint256(v - type(int64).min) > type(uint64).max) revert ValueOutOfRange(v);
+        }
         return v;
     }
 
@@ -506,10 +508,18 @@ library FVMRewards {
         uint256 count;
         (count, cur) = _readHead(cur);
         amounts = new uint256[](count);
+        uint256 out;
+        assembly ("memory-safe") {
+            out := add(amounts, 32)
+        }
         for (uint256 i = 0; i < count; i++) {
             uint256 len;
             (len, cur) = _readHead(cur);
-            amounts[i] = _readBigInt(cur, len);
+            uint256 value = _readBigInt(cur, len);
+            assembly ("memory-safe") {
+                mstore(out, value)
+                out := add(out, 32)
+            }
             cur += len;
         }
     }
