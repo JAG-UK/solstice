@@ -734,10 +734,35 @@ Final: SRA deterministic **146/146 Green** (SRAQuarter 44 + SRARegistry 28 + SRA
 
 ```bash
 # project foundry.toml usable directly (forge 1.7.1; P0 fixed fmt/lint)
-forge test --match-contract SRA          # SRA tests (146 deterministic + 5 invariant)
-forge test --match-contract SRAInvariant # invariant only (~3 minutes)
-forge test                               # full suite (151 SRA + 144 existing = 295)
-halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-timeout-branching 2000 --solver-timeout-assertion 60000   # state-machine symbolic verification (4/4)
+
+# --- deterministic + contract tests (default suite) ---
+forge test --match-contract SRA          # SRA tests (deterministic + invariant + differential + contract)
+forge test                               # full suite (SRA + existing f02/governance tests)
+
+# --- invariant only (handler-based randomized sequences, ~3 minutes) ---
+forge test --match-contract SRAInvariant
+
+# --- differential tests (Python independent reference model, 175 cases, seed=42) ---
+forge test --match-contract DifferentialShares
+
+# --- symbolic verification (halmos) ---
+# 前置: forge 1.7+ 默认不为 test 合约输出 AST, 而 halmos 从 out/ 读取 ast 字段 —— 先 `forge build --ast`
+# (若跳过此步, halmos 报 "KeyError: 'ast'"; 自 halmos 0.1.13 起 extra_output=["ast"] 已被 forge 移除, 改为 --ast flag)
+forge build --ast
+# 两个 harness 的父构造器含 Safe 检查(isProbablyASafe), halmos 符号执行 constructor 会路径超限
+# ("ValueError: constructor: # of paths")——必须 --no-test-constructor; --loop 64 展开余数补位循环;
+# 默认 SMT branching timeout=1ms 太短, 需加大
+halmos --contract ComputeSharesCheck --no-test-constructor --loop 64 --solver-timeout-branching 2000 --solver-timeout-assertion 60000   # _computeShares 6/6 (~125s)
+halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-timeout-branching 2000 --solver-timeout-assertion 60000   # quarter-window state machine 4/4
+# ("Skipped console2.json ... KeyError: 'metadata'" 是无害 warning, forge-std 库文件, 可忽略)
+
+# --- static analysis (slither 0.11.x) ---
+slither . --exclude-dependencies         # 0 high / 0 medium (2 style-class findings, see §5.10)
+
+# --- quality gates (CI) ---
+forge fmt --check
+forge lint --deny notes --quiet
+forge coverage --match-contract SRA      # SRA line coverage 100% (branch 67% is the lcov tool ceiling, see §5.11)
 ```
 
 **Development history (progression of the SRA suite; kept for traceability)**:
@@ -950,7 +975,7 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
 
 - Target: `_computeShares` (largest-remainder method, pure function).
 - Properties: conservation (n=1/2/3, Σ==1e18) ✅ | monotonicity (larger usd gets ≥ share) ✅ | floor bound (each share ∈ {floor, floor+1}) ✅ | no overflow (business domain) ✅.
-- Run: `--no-test-constructor --loop 64 --solver-timeout-branching 2000 --solver-timeout-assertion 60000`, ~125s.
+- Run: 前置 `forge build --ast`（forge 1.7+ 默认不为 test 合约输出 AST；halmos 0.1.13 读 out/ 需要 ast 字段），然后 `halmos --contract ComputeSharesCheck --no-test-constructor --loop 64 --solver-timeout-branching 2000 --solver-timeout-assertion 60000`, ~125s. 完整命令见 §4.5.
 - **Value-domain note**: symbolic domain 1e3 (shares depend only on usd ratios; equal scaling does not change allocation, so the ratio space is fully covered; 012 report §C1 details the 1e40→1e3 tightening process and SMT-solving trade-offs).
 
 #### State-machine verification (quarter windows): 4/4 PASS
