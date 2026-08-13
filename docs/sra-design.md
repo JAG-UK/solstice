@@ -22,7 +22,7 @@ Core features:
 
 - Scope: all key decisions for Issue #4, from design to PR.
 - Decision groups used throughout: **D** design decisions (settled) | **S** structural decisions (approval) | **C** conflict rulings (found test-first) | **T** test decisions (defect fixes) | **G** coverage-gap closures | **I/R** implementation-layer risks and mitigations.
-- Status: all landed — design approved and converged; implementation **267/267 tests Green** (118 SRA deterministic + 5 invariant + 144 existing); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS + quarter-window 4/4 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; spec-conformance deviations A/B/C/D/E reviewed by the user one by one and uniformly landed (T11); audit hardening V1/V2/V3 (overflow DoS) + B1/C1/E1/E2/F2 (remaining input-domain bounds) landed.
+- Status: all landed — design approved and converged; implementation **295/295 tests Green** (146 SRA deterministic + 5 invariant + 144 existing); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS + quarter-window 4/4 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; spec-conformance deviations A/B/C/D/E reviewed by the user one by one and uniformly landed (T11); audit hardening V1/V2/V3 (overflow DoS) + B1/C1/E1/E2/F2 (remaining input-domain bounds) + QA-system fixes S1-S5 (adversarial matrix / security-claim map / evidence-condition annotation / threat matrix / reviewer checklist) landed.
 
 ### 1.3 Source Annotation System
 
@@ -454,10 +454,10 @@ submitShares(Q):
 | S | S3 / S4 / S6 / S9 / S10 / S11 / S12 | ⏳ not individually reviewed (standard practice, verified by the implementation) |
 | C | C1-C8 | ✅ ruled and landed (C8 closed with the forge 1.7.1 upgrade; C7 superseded by deviation-A alignment) |
 | T | T2-T11 | ✅ disposed (T6/T10 implementation defects, TDD fix; T7-T9 correctness assurance landed; T11 spec-conformance alignment A/B/D + C/E clarification; post-review audit hardening V1/V2/V3 + B1/C1/E1/E2/F2 landed as T12) |
-| G | G1-G7 | ✅ closed (58 → 74 → 77 → 91 → 94 → 96 → 100 → 103 → 109 → 123 tests) |
+| G | G1-G7 | ✅ closed (58 → 74 → 77 → 91 → 94 → 96 → 100 → 103 → 109 → 123 → 151 tests) |
 | I/R | I1 / I2 / I5 / R1 | ✅ mitigations landed (tests + implementation semantics double assurance) |
 
-**Final acceptance**: the implementation aligns with all design rulings, and the spec-conformance deviations A/B/C/D/E were reviewed by the user one by one and uniformly landed (T11); **267/267 tests Green** (118 SRA deterministic + 5 invariant + 144 existing); SRA line coverage 100%, branch 67.16% (tool statistical ceiling; governance function-body require branches under-counted by the lcov modifier quirk); `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; aggregatedFPV read auto-triggers finalize, PRICE_BAND anchored reference, and MIN_LOT filtering all locked by targeted tests; audit hardening V1/V2/V3 (overflow DoS, input-domain bounds) and B1/C1/E1/E2/F2 (remaining bounds + owner rotation) landed with 6 + 8 regression tests.
+**Final acceptance**: the implementation aligns with all design rulings, and the spec-conformance deviations A/B/C/D/E were reviewed by the user one by one and uniformly landed (T11); **295/295 tests Green** (146 SRA deterministic + 5 invariant + 144 existing); SRA line coverage 100%, branch 67.16% (tool statistical ceiling; governance function-body require branches under-counted by the lcov modifier quirk); `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; aggregatedFPV read auto-triggers finalize, PRICE_BAND anchored reference, and MIN_LOT filtering all locked by targeted tests; audit hardening V1/V2/V3 (overflow DoS, input-domain bounds) and B1/C1/E1/E2/F2 (remaining bounds + owner rotation) landed with 6 + 8 regression tests; QA-system fixes S1-S5 landed (adversarial input matrix 28 tests / security-claim-to-code map / evidence-condition annotation / threat model matrix / reviewer checklist).
 
 ## 4. Test Strategy and Coverage
 
@@ -472,11 +472,12 @@ submitShares(Q):
 | `test/SRAShares.t.sol` | Share computation + burn + freeze snapshot + SetShares | 17 | 1, 3, 4, 10, 12 |
 | `test/SRAIntegration.t.sol` | **Integration contract tests** (simulate the SWA gating consumer of aggregatedFPV; deviation A disposition) | 4 | 11 |
 | `test/SRAOverflowDoS.t.sol` | **Overflow DoS regression tests** (audit findings V1/V2/V3 — anchor pollution / finalizeConversion overflow / _computeShares overflow; input-domain hardening) | 6 | 2, 8, 9 (overflow-DoS hardening) |
+| `test/SRAAdversarial.t.sol` | **Adversarial input matrix** (S1, QA system fix): boundary probes of the external write surface — q-window boundaries (future quarter / uint64.max), FPV exact-limit accept / limit+1 reject, zero-address probes, setPricingParams full parameter grid, empty-array semantics, multi-orchestrator aggregate bound | 28 | 2, 8, 9 (adversarial layer: every external write function's numeric/address/array parameters at their boundaries) |
 | `test/SRAInvariant.t.sol` | **Invariant tests** (P1/A2/A3): handler random operations + 5 persistent invariants | 5 | I1 share conservation / I2 binding uniqueness / I3 governance consistency / A2 freeze-snapshot exclusion / A3 all-zero burn |
 | `test/differential/DifferentialShares.t.sol` | **Differential tests** (t1): Python independent reference model cross-validates three computation cores (largest-remainder / FPV aggregation / PRICE_BAND), breaking same-source bias | 3 | 1, 9, 8 (independent reference model) |
 | `test/halmos/QuarterWindowCheck.t.sol` | **State-machine symbolic verification** (blind spot 4 closed): Halmos formally proves parameter-independent quarter-window properties (T2a quarter boundary / T3 constant interval / T4 snapshot-time independence / T5b empty-history boundary); harness in `test/halmos/QuarterWindowHarness.sol` | 4 (halmos, not in the forge suite) | 2, 3, 4 (symbolic verification layer) |
 
-**123 forge test functions in total** (118 deterministic + 5 invariant; of the 118 deterministic, 109 are in the 5 SRA suites above, 6 are overflow-DoS regressions in `test/SRAOverflowDoS.t.sol`, and 3 are differential), plus 4 Halmos symbolic-verification checks (not in the forge suite); covers all 12 test strategies in §4.2 + 3 new persistent invariants from P1 + A2/A3 correctness invariants + A2 defect regression + integration contract tests + differential cross-validation + state-machine symbolic verification + A/B/D deviation alignment + overflow-DoS hardening (V1/V2/V3) + audit bound enforcement (B1/C1/E1/E2/F2). Full suite: 123 SRA + 144 existing = **267 tests**.
+**151 forge test functions in total** (146 deterministic + 5 invariant; of the 146 deterministic, 109 are in the 5 SRA suites above, 6 are overflow-DoS regressions in `test/SRAOverflowDoS.t.sol`, 28 are adversarial probes in `test/SRAAdversarial.t.sol`, and 3 are differential), plus 4 Halmos symbolic-verification checks (not in the forge suite); covers all 12 test strategies in §4.2 + 3 new persistent invariants from P1 + A2/A3 correctness invariants + A2 defect regression + integration contract tests + differential cross-validation + state-machine symbolic verification + A/B/D deviation alignment + overflow-DoS hardening (V1/V2/V3) + audit bound enforcement (B1/C1/E1/E2/F2) + adversarial input matrix (S1). Full suite: 151 SRA + 144 existing = **295 tests**.
 
 ### 4.2 Strategy Point Coverage Matrix
 
@@ -503,13 +504,13 @@ submitShares(Q):
 
 | # | Gap | Added tests (file:line) | Verification point |
 |---|-----|-------------------------|--------------------|
-| **G1** | `setPricingParams`/`getPricingParams` untested | `SRAQuarter:463` `test_SetPricingParams_UpdatesParams_GetReturns`<br>`SRAQuarter:478` `..._NonOwner_Reverts`<br>`SRAQuarter:486` `..._InvalidParams_Reverts` (maxPricePeriods=0 / band>10000)<br>`SRAQuarter:508` `..._NewBand_AppliesToNewPrints` (+20% rejected after band change) | parameter management: update takes effect / gating / invalid params / new band applies to subsequent prints |
-| **G2** | 64-full + submitShares combination untested | `SRAShares:302` `test_SubmitShares_AtFullCapacity_SixtyFourRecipients` | all 64 post → map has exactly 64 recipients (mock MAX_RECIPIENTS boundary), 64-way even split with 1e18/64 each, Σ exact |
-| **G3** | band exact ±20% boundary untested | `SRAQuarter:241` `..._ExactlyPlusBand_Accepts` (+2000bps boundary inclusive)<br>`SRAQuarter:259` `..._ExactlyMinusBand_Accepts` (-2000bps boundary inclusive)<br>`SRAQuarter:277` `..._JustOverBand_Reverts` (+2001bps rejected)<br>`SRAQuarter:296` `..._JustUnderBand_Reverts` (-2001bps rejected) | `_checkPriceBand` uses `>=`/`<=` boundary-inclusive: exactly-band accepted, 1bps over rejected |
-| **G4** | MAX_PRICE_PERIODS exactly 32 untested | `SRAQuarter:320` `test_PostVolume_MaxPricePeriods_ExactlyAccepted` | exactly 32 PricePeriods accepted (`<=`); 33 rejected already covered |
-| **G5** | multi-quarter share isolation untested | `SRAShares:324` `test_SubmitShares_MultiQuarter_Isolated` | quarter 0 posts A/B → quarter 1 only C posts → quarter 1 map contains only C (no residue), quarter 0 result unaffected |
-| **G6** | failure-path asymmetry | `SRARegistry:295` `test_Replace_AlreadyAdmittedTarget_Reverts` (replace target already admitted)<br>`SRARegistry:311` `test_ReassignBinding_NotAdmittedTarget_Reverts` (target not admitted)<br>`SRARegistry:330` `test_Remove_NotAdmitted_Reverts` (non-orchestrator)<br>`SRARegistry:342` `test_Remove_FrozenOrch_Succeeds` (frozen orchestrator can be removed; implementation does not block) | governance failure branches: errors thrown at the third permissionless execution of the function body |
-| **G7** | no fuzzing | `SRAShares:365` `test_SubmitShares_Fuzz_SumAlwaysExact(uint256,uint256,uint256)` | 3 random usdValues (<1e30 to avoid overflow) → Σ shares always exactly == 1e18 (largest-remainder core invariant, 256 runs) |
+| **G1** | `setPricingParams`/`getPricingParams` untested | `SRAQuarter:475` `test_SetPricingParams_UpdatesParams_GetReturns`<br>`SRAQuarter:490` `..._NonOwner_Reverts`<br>`SRAQuarter:498` `..._InvalidParams_Reverts` (maxPricePeriods=0 / band>10000)<br>`SRAQuarter:532` `..._NewBand_AppliesToNewPrints` (+20% rejected after band change) | parameter management: update takes effect / gating / invalid params / new band applies to subsequent prints |
+| **G2** | 64-full + submitShares combination untested | `SRAShares:304` `test_SubmitShares_AtFullCapacity_SixtyFourRecipients` | all 64 post → map has exactly 64 recipients (mock MAX_RECIPIENTS boundary), 64-way even split with 1e18/64 each, Σ exact |
+| **G3** | band exact ±20% boundary untested | `SRAQuarter:245` `..._ExactlyPlusBand_Accepts` (+2000bps boundary inclusive)<br>`SRAQuarter:265` `..._ExactlyMinusBand_Accepts` (-2000bps boundary inclusive)<br>`SRAQuarter:285` `..._JustOverBand_Reverts` (+2001bps rejected)<br>`SRAQuarter:306` `..._JustUnderBand_Reverts` (-2001bps rejected) | `_checkPriceBand` uses `>=`/`<=` boundary-inclusive: exactly-band accepted, 1bps over rejected |
+| **G4** | MAX_PRICE_PERIODS exactly 32 untested | `SRAQuarter:332` `test_PostVolume_MaxPricePeriods_ExactlyAccepted` | exactly 32 PricePeriods accepted (`<=`); 33 rejected already covered |
+| **G5** | multi-quarter share isolation untested | `SRAShares:326` `test_SubmitShares_MultiQuarter_Isolated` | quarter 0 posts A/B → quarter 1 only C posts → quarter 1 map contains only C (no residue), quarter 0 result unaffected |
+| **G6** | failure-path asymmetry | `SRARegistry:326` `test_Replace_AlreadyAdmittedTarget_Reverts` (replace target already admitted)<br>`SRARegistry:342` `test_ReassignBinding_NotAdmittedTarget_Reverts` (target not admitted)<br>`SRARegistry:361` `test_Remove_NotAdmitted_Reverts` (non-orchestrator)<br>`SRARegistry:373` `test_Remove_FrozenOrch_Succeeds` (frozen orchestrator can be removed; implementation does not block) | governance failure branches: errors thrown at the third permissionless execution of the function body |
+| **G7** | no fuzzing | `SRAShares:369` `test_SubmitShares_Fuzz_SumAlwaysExact(uint256,uint256,uint256)` | 3 random usdValues (bounded < 1e30, aligned with the code-enforced MAX_STABLE_USD — S3: sampling domain = enforced input domain, not a test-side shrink) → Σ shares always exactly == 1e18 (largest-remainder core invariant, 256 runs) |
 
 **Implementation issue found**: while writing the G1 tests it was found that the reference updates with each qualifying print (C6 semantics: the last one becomes the new reference) — the "new band applies" test was accordingly changed to directly verify that a value accepted under the old band is rejected after the band change (+20% over-band at band 10%, boundary at band 20%), avoiding reference-update interference with the assertion. (Later superseded by the anchored-reference semantics of deviation-D alignment, §4.3.9.)
 
@@ -636,6 +637,8 @@ PRICE_BAND cross-multiplication determination all consistent with the independen
 
 **4/4 PASS**. The original proposition set T1 (full coverage + mutual exclusion) / T5 (interval search vs mathematical definition) / T6 (pairwise mutual exclusion) was **downgraded due to halmos 0.1.13 tool limits** (probe experiments confirmed): ① immutables become symbolic after skipping the constructor (window constants have no concrete values) → absolute boundary membership cannot be verified; ② `vm.warp` does not work on symbolic parameters (block.number cannot be symbolized) → universal verification of completeness relying on `currentEpoch()` is infeasible; ③ storage array element reads after push are wrong (length correct but elements symbolic) → freeze-interval search cannot be verified with storage-preset data. The downgraded propositions are covered by dynamic tests: window boundary ±1 on both sides 8 cases (SRAQuarter.t.sol), freeze/unfreeze in both directions + invariant A2 random freeze-history exclusion, 100% line coverage with no unexecuted paths — blind spot 4 is substantially closed within the tool's capability.
 
+> **Evidence conditions (S3 annotation)** — the symbolic domain here is the **weak form** "arbitrary window config (immutables symbolized) + q small-domain enumeration + block.number = 0" (tool limits ①/②); it is **not** a universal-domain proof. The strong boundary semantics (now = E / E+1 / E+P / E+P+1 / E+P+V / E+P+V+1) are covered by the dynamic ±1 test set. The `_computeShares` Halmos proof (t8) additionally uses a symbolic usd domain of MAX_USD = 1e3 — a **proportional-space** sample (shares depend only on usd ratios, invariant under scaling); the enforced absolute domain (MAX_STABLE_USD = 1e30) is covered independently by the §5.5 domain-math bounds (band ≤ 1.2e64 / finalize ≤ 1e57 / per-orch ≤ 3.3e58 / total ≤ 2.1e60 ≪ 2^256), whose premise is now enforced in code (`_validateFpvBounds` at both input entries). Full report: `.ghost/references/012-sra-toolchain-verification.md` (t8) and `.ghost/references/015-sra-statemachine-verification.md` (t8's successor).
+
 #### 4.3.9 Spec-Conformance Alignment Registry (deviation A/B/D unified implementation, 103 → 109 tests)
 
 > After the user reviewed the 5 deviations one by one (principle: spec alignment first), the unified implementation landed: **A/B/D source+test alignment, C/E documentation clarification**.
@@ -676,6 +679,29 @@ PRICE_BAND cross-multiplication determination all consistent with the independen
 
 Final: SRA deterministic **118/118 Green** (SRAQuarter 44 + SRARegistry 28 + SRAShares 17 + SRAIntegration 4 + SRAGovernance 16 + SRAOverflowDoS 6 + differential 3), invariant 5/5, full suite **267/267** (123 SRA + 144 existing) no regression, `forge fmt --check` / `forge lint` clean.
 
+#### 4.3.11 QA-System Fix Registry (S1-S5, 123 → 151 tests)
+
+> The V1/V2/V3 finding was a **symptom of a QA-system gap**, not an isolated bug: every verification layer (deterministic/fuzz/invariant/differential) exercised inputs inside the "business domain" and none probed malicious extreme inputs; the security review was hypothesis-driven ("business domain ~1e6 → safe") rather than code-driven; evidence application conditions were broken (a bounded-domain Halmos proof was cited as whole-domain evidence; the fuzz `vm.assume(<1e30)` was a test-side shrink to dodge overflow); the threat model covered only honest-but-faulty callers; the reviewer default-trusted document "Safe" marks. The structural fixes S1-S5 close these gaps (diagnosis: `.ghost/references/016-sra-qa-review.md`).
+
+**S1 — adversarial input test layer** (`test/SRAAdversarial.t.sol`, 28 tests, this pass):
+- q-parameter window boundaries: postVolume/correctVolume/finalizeConversion/submitShares × (future quarter / uint64.max) → exact `NotInPostingWindow` / `NotInVerificationWindow` / `NotBound` selectors (7 tests)
+- FPV field exact limits: each of stableUSD/lotUsd/claimFil/attoFil at its MAX accepts, MAX+1 rejects `InvalidParameter` (8 tests, Q0 cold start isolates `_validateFpvBounds` from the band check)
+- zero-address probes: admit(0) accepted (governance semantics locked), freeze(0) NotAdmitted, registerPairs zero payer accepted, replaceOwner(0) NotSafeProxy, reassignBinding(0) NotAdmitted (5 tests)
+- setPricingParams full parameter grid: priceBand ∈ {0, 10000} accepted (10001 rejected already covered), maxPricePeriods = 1 accepted, minLot ∈ {0, 1e30} accepted (1e30+1 rejected already covered, B1) (5 tests)
+- empty-array semantics: registerPairs empty no-op, setAdmittedLists empty clears both allowlists (2 tests)
+- multi-orchestrator aggregate bound: 2 × MAX_STABLE_USD posts → shares still Σ == 1e18 (1 test)
+- every revert uses an **exact error selector** (no bare `expectRevert` — zero added, satisfying the §4.3.10 N3 requirement)
+
+**S2 — security-claim → code-enforcement map** (§5.1 table): every "Safe"/"Conditionally safe" conclusion now cites the enforcing code point (require / mechanism, file:line); a claim without an enforcement reference fails review. Maps all 8 categories (e.g. Integer overflow → `_validateFpvBounds` @ postVolume:351 + correctVolume:545; DoS caps → MAX_PAIRS:329 / MAX_ALLOWLIST:492 / MAX_ORCHESTRATORS:395).
+
+**S3 — evidence-application-condition annotation**: the fuzz sampling domain `(0,1e30)` is re-annotated as **equal to the code-enforced MAX_STABLE_USD** (not a test-side shrink — `SRAShares:369` + `SRAInvariant:255,268`); the Halmos `MAX_USD=1e3` symbolic domain is annotated as a **proportional-space** proof with the enforced absolute domain's arithmetic safety independently covered by the §5.5 domain-math bounds (docs §4.3.8 S3 note; `.ghost/references/012` + `015`).
+
+**S4 — threat model matrix** (§5.13): all 15 external write functions × (malicious orchestrator / compromised owner) → impact → mitigation → sufficiency; every function is closed either by unanimous dual-Safe governance or by code-enforced input bounds + timing gates.
+
+**S5 — reviewer checklist** (§5.14): 6 items forcing the reviewer to challenge premises — security-claim→code map verified against source / evidence conditions satisfied by code / adversarial internal party in scope / adversarial input coverage complete / test-claim correspondence (no bare `expectRevert`) / Red-first regression after any new finding.
+
+Final: SRA deterministic **146/146 Green** (SRAQuarter 44 + SRARegistry 28 + SRAShares 17 + SRAIntegration 4 + SRAGovernance 16 + SRAOverflowDoS 6 + SRAAdversarial 28 + differential 3), invariant 5/5, full suite **295/295** (151 SRA + 144 existing) no regression, `forge fmt --check` / `forge lint` clean.
+
 ### 4.4 Key Test Design Decisions
 
 #### 4.4.1 Test Constants (constructor config)
@@ -707,9 +733,9 @@ Final: SRA deterministic **118/118 Green** (SRAQuarter 44 + SRARegistry 28 + SRA
 
 ```bash
 # project foundry.toml usable directly (forge 1.7.1; P0 fixed fmt/lint)
-forge test --match-contract SRA          # SRA tests (118 deterministic + 5 invariant)
+forge test --match-contract SRA          # SRA tests (146 deterministic + 5 invariant)
 forge test --match-contract SRAInvariant # invariant only (~3 minutes)
-forge test                               # full suite (123 SRA + 144 existing = 267)
+forge test                               # full suite (151 SRA + 144 existing = 295)
 halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-timeout-branching 2000 --solver-timeout-assertion 60000   # state-machine symbolic verification (4/4)
 ```
 
@@ -738,16 +764,18 @@ halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-ti
 
 ### 5.1 Review Conclusion Summary
 
-| # | Category | Conclusion | Key basis |
-|---|----------|------------|-----------|
-| 1 | Reentrancy | ✅ Safe | no value transfer; the only external call is an fvm precompile with no callback surface |
-| 2 | Denial of Service (DoS) | ⚠️ Conditionally safe | all traversals have hard caps (64/32); freeze-history arrays and the replace chain are theoretical growth points |
-| 3 | Access control | ✅ Safe | governance dual-Safe unanimous + hold; orchestrator self-operations gated; constructor validates Safe proxy |
-| 4 | Integer overflow | ✅ Safe | 0.8.x checked arithmetic fully on; **input-domain bounds enforced at the entries** (MAX_STABLE_USD=1e30 / MAX_LOT_USD=1e30 / MAX_ATTO_FIL=1e27 / MAX_CLAIM_FIL=1e30, audit V1/V2/V3 fix); Halmos P6 no overflow |
-| 5 | Encoding and boundaries (ABI/CBOR) | ⚠️ Conditionally safe | input side protected by the ABI decoder; output side bounded CBOR; wire contract pending f02 implementation check |
-| 6 | Precision issues | ✅ Safe | floor + largest-remainder Σ==1e18; rational rates; Halmos conservation/monotonicity/floor bound |
-| 7 | Governance path | ✅ Safe | three-phase + dual Safe + event traceability; re-admit semantics closed after T10 |
-| 8 | Front-running | ✅ Safe | E+POST snapshot semantics independent of keeper timing; permissionless triggers have no privilege and no MEV |
+> **S2 security-claim → code-enforcement map**: each "Safe" conclusion below must cite the enforcing code point (require / mechanism); a claim without an enforcement reference fails review.
+
+| # | Category | Conclusion | Key basis | Code-enforcement point |
+|---|----------|------------|-----------|------------------------|
+| 1 | Reentrancy | ✅ Safe | no value transfer; the only external call is an fvm precompile with no callback surface | no value transfer (no `payable`/`call`/`transfer` anywhere in `src/ServiceRewardsActor.sol`); the only external call is `FVMRewards.setShares` (fvm precompile, no callback), `submitShares:577` |
+| 2 | Denial of Service (DoS) | ⚠️ Conditionally safe | all traversals have hard caps (64/32); freeze-history arrays and the replace chain are theoretical growth points | `registerPairs` `pairs.length <= MAX_PAIRS(64)` `:329`; `setAdmittedLists` `length <= MAX_ALLOWLIST(64)` `:492`; `postVolume`/`correctVolume` `filPeriods.length <= maxPricePeriods` `:351`/`:545`; `admit` `admittedCount < MAX_ORCHESTRATORS(64)` `:395`. Freeze-history / replace-chain growth is unbounded by design (needs n unanimous governance actions to construct — theoretical only, no code cap) |
+| 3 | Access control | ✅ Safe | governance dual-Safe unanimous + hold; orchestrator self-operations gated; constructor validates Safe proxy | `unanimous`/`unanimousNoHold` modifiers gate every governance method (`admit:395` / `remove:410` / `freeze:424` / `unfreeze:434` / `replace:447` / `reassignBinding:473` / `replaceOwner:484` / `setAdmittedLists:492` / `setPricingParams:520` / `correctVolume:545`); `_veto` requires `msg.sender.isOwner()` (cancelPending:533); constructor `newOwner.isProbablyASafe()` (E2 `:256`) |
+| 4 | Integer overflow | ✅ Safe | 0.8.x checked arithmetic fully on; **input-domain bounds enforced at the entries** (MAX_STABLE_USD=1e30 / MAX_LOT_USD=1e30 / MAX_ATTO_FIL=1e27 / MAX_CLAIM_FIL=1e30, audit V1/V2/V3 fix); Halmos P6 no overflow (symbolic domain MAX_USD=1e3 — proportional-space proof; the enforced absolute domain's arithmetic safety is independently covered by the domain-math bounds below, S3: proof premise = code-enforced domain) | `_validateFpvBounds` enforces all four field bounds at **both** input entries — `postVolume:351` and `correctVolume:545` (plus `claimFil > 0`); `_updateLastBoundPrint` refuses domain-out-of-range prints from becoming the anchor (deep defense, `:803`); checked arithmetic (0.8.36 default) |
+| 5 | Encoding and boundaries (ABI/CBOR) | ⚠️ Conditionally safe | input side protected by the ABI decoder; output side bounded CBOR; wire contract pending f02 implementation check | input side: Solidity ABI decoder (compile-time, rejects malformed calldata); output side: bounded CBOR in f02 mock (`test/mocks/FVMRewardActor.sol`); wire contract vs real f02 implementation is a protocol-layer premise (no contract-layer code can enforce it) |
+| 6 | Precision issues | ✅ Safe | floor + largest-remainder Σ==1e18; rational rates; Halmos conservation/monotonicity/floor bound | `_computeShares` largest-remainder method `:735` (Σ shares == SHARE_TOTAL exactly, remainder descending + residue top-ups); rational rates (`attoFil * lotUsd / claimFil`) kept in integer math |
+| 7 | Governance path | ✅ Safe | three-phase + dual Safe + event traceability; re-admit semantics closed after T10 | three-phase `unanimous` modifier (approve/approve/hold → permissionless execution, `UnanimousGovernance.sol`); re-admit identity reset in `admit:395` (clears successor/frozen/freezeEpochs — T10 A2 fix) |
+| 8 | Front-running | ✅ Safe | E+POST snapshot semantics independent of keeper timing; permissionless triggers have no privilege and no MEV | `_frozenAtPostEnd` derives the frozen snapshot from the freeze-history arrays at the E+POST instant (`:303`), independent of when the caller invokes finalize/submitShares; permissionless `finalizeConversion:572` / `submitShares:577` / `aggregatedFPV:635` have no privileged action |
 
 **Overall conclusion**: the SRA is a **value-transfer-free** pure state machine (writes f02 shares); the attack surface concentrates on **governance authority** and **data correctness**.
 The governance surface is strongly constrained by dual-Safe unanimous + hold; data correctness is assured by 100% line-coverage tests + 5 invariants + Halmos symbolic verification + Slither static analysis
@@ -822,12 +850,19 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
   - `_finalizeConversion` (V2): `attoFil × lotUsd ≤ 1e27×1e30 = 1e57 ≪ 2^256` (`MAX_ATTO_FIL = 1e27` ≈ 1e9 FIL — network supply is ~2e9 FIL, a single print physically cannot exceed it);
   - `_computeShares` (V3): per-orchestrator usd ≤ `1e30 + 32×1e57 ≈ 3.3e58 < 2^256/1e18`; total (≤ 64) ≤ `2.1e60 ≪ 2^256`.
   - Deep defense: `_updateLastBoundPrint` also skips out-of-domain prints, so the PRICE_BAND anchor can never be polluted even via a future entry bypassing `_validateFpvBounds`.
+
+**Bound-value rationale (why 1e30 / 1e27, and why the MAX_CLAIM_FIL / MAX_ATTO_FIL asymmetry)**:
+
+  - **Loose-by-design**: the assumed business domain is ~1e6 USD/quarter. All three USD/FIL value bounds sit at 1e30 — ~24 orders of magnitude above the business domain and ≈1e16× Earth's annual GDP (~1e14 USD) — so no realistic service revenue can ever approach the cap. The bounds are immutable (`constant`), so the looseness is a deliberate trade: permanent headroom in exchange for a cap that is not tight. The arithmetic chain above still closes with ≥3.5× headroom at its tightest link (V3 per-orch usd 3.3e58 vs `2^256/1e18 ≈ 1.16e59`).
+  - **MAX_ATTO_FIL = 1e27 (= 1e9 FIL) — the chain's keystone and its only *physical* bound**: Filecoin's total supply is ~2e9 FIL; a single print's attoFil can physically never exceed 1e9 FIL. This is the only bound resting on a physical invariant rather than a business assumption. Loosening it to 1e30 would make per-orch usd ≈ 3.2e61 > `2^256/1e18` and re-open V3 — the keystone cannot be relaxed without re-deriving the chain.
+  - **MAX_CLAIM_FIL = 1e30 is intentionally *not* tightened to the FIL supply**: `claimFil` sits in the **denominator** of `_finalizeConversion` (`attoFil × lotUsd / claimFil` — a larger value only shrinks the result; the only dangerous value is 0, guarded by `ZeroClaimFil`), and in `_checkPriceBand` it multiplies as `lotUsd × claimFil × (BASIS_POINTS+band)` where 1e30×1e30×12000 ≈ 1.2e64 still leaves ~13 orders of magnitude below 2^256. So claimFil does not constrain the overflow closure the way attoFil does — the symmetric 1e30 is kept for simplicity (tightening buys no arithmetic safety). Note the `PricePeriod` struct comment marks claimFil as `attoFIL`; read that way, 1e30 attoFIL = 1e12 FIL still exceeds the physical supply — harmless for the same denominator reason, and `2e9 FIL (= 2e27 attoFIL)` is the natural value if a tighter semantic cap is ever desired.
+  - **⚠️ Maintenance warning**: the closure above assumes all four bounds + `MAX_PRICE_PERIODS(32)` + `MAX_ORCHESTRATORS(64)` hold **together** — the links are interdependent, not independent. If any of these constants is ever changed (e.g. raising MAX_PRICE_PERIODS or MAX_ATTO_FIL), re-derive this chain before shipping.
 - **Other input-domain bounds (audit B1/C1/E2/F2)**: beyond the FPV value fields, the remaining length/value inputs are bounded so the "DoS conditionally safe (traversals hard caps 64/32)" premise holds everywhere:
   - **B1** `setPricingParams` validates `minLot <= MAX_LOT_USD` (a minLot=max would silently skip every print with lotUsd ≤ MAX_LOT_USD — FIL pricing silent loss, worse than a revert);
   - **C1** `registerPairs` validates `pairs.length <= MAX_PAIRS(64)` (`error TooManyPairs`), aligned with MAX_ORCHESTRATORS;
   - **F2** `setAdmittedLists` validates `stablecoins.length <= MAX_ALLOWLIST(64) && filecoinPayContracts.length <= MAX_ALLOWLIST`;
   - **E2** the constructor validates the same pricing-parameter bounds as setPricingParams plus `epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0` — deployment misconfiguration fails fast instead of silently misbehaving.
-- **Share computation**: `_computeShares`'s `usds[i] * SHARE_TOTAL` (×1e18) — usd aggregation at business magnitude ~1e6 (USD face value); 1e6 × 1e18 = 1e24 ≪ 2^256 ≈ 1.16e77; Halmos P6 `check_NoOverflow_Boundary` proves no overflow within the symbolic domain (012 report §C1).
+- **Share computation** (*historical magnitude note* — superseded as the primary argument by the entry-enforced input-domain bounds above; kept for its Halmos reference): `_computeShares`'s `usds[i] * SHARE_TOTAL` (×1e18) — usd aggregation at business magnitude ~1e6 (USD face value); 1e6 × 1e18 = 1e24 ≪ 2^256 ≈ 1.16e77; Halmos P6 `check_NoOverflow_Boundary` proves no overflow within the symbolic domain (012 report §C1).
 - **Window computation**: `_qEnd` uses `uint256(ACTIVATION_EPOCH) + uint256(q) * uint256(EPOCHS_PER_QUARTER)` as an intermediate guard (S1C, §2.5.1), then casts to Epoch(uint96).
 - **PRICE_BAND cross-multiplication**: `_checkPriceBand`'s `lhs = p.lotUsd * lastClaimFil * BASIS_POINTS` (domain ~1e18 × 1e18 × 1e4 = 1e40 < 2^256), and `priceBand ≤ BASIS_POINTS` is validated by `setPricingParams` (`InvalidParameter`).
 - **Epoch magnitude**: Epoch is uint96 (2^96 ≈ 7.9e28 epochs, ~2.5e29 years) — quarter number Q × EPOCHS_PER_QUARTER at normal business scale is far below this (design S1C "quantization headroom 3×10⁸× universe age").
@@ -954,6 +989,38 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
 - [ ] **Dual Safe addresses**: confirm real Safe proxies (constructor `isProbablyASafe` check); private keys held by distinct entities.
 - [ ] **service stream 2 registration**: f02-side stream 2's writer points to the SRA address (the mock simulates this flow; tests §4.4.3).
 - [ ] **replace chain length and freeze-history growth monitoring**: if governance frequency rises significantly, evaluate adding hard caps (§5.3 residual risk).
+
+### 5.13 Threat Model Matrix (S4, adversarial-internal-party coverage)
+
+> **S4 fix**: the previous threat model covered only "honest-but-faulty" callers; V1/V2/V3 showed the missing dimension — a **malicious / compromised internal party** (an admitted orchestrator, or a compromised owner) must be in scope. For each external write function: threat party × impact × mitigation × sufficiency.
+
+| Function | Threat party | Impact | Mitigation | Sufficient? |
+|----------|--------------|--------|------------|-------------|
+| `registerPairs` | malicious orchestrator | binding spam / pair squatting (uniqueness keeps 1-pair-1-owner) | `MAX_PAIRS(64)` batch bound + `NotAdmitted`/`NotFrozen` gates; `AlreadyBound` uniqueness; pairs claimable after Remove | ✅ (data hygiene; no value at stake) |
+| `postVolume` | malicious orchestrator | extreme FPV → overflow DoS (V1/V2/V3); band deviation | `_validateFpvBounds` (4 field bounds + claimFil>0) at entry `:351`; `_checkPriceBand` vs anchored reference (deviation ≤ band); `TooManyPricePeriods`; `AlreadyPosted` once-per-quarter | ✅ (bounds + band both enforced in code; S1 adversarial suite locks 28 edges) |
+| `admit` / `remove` | compromised owner | arbitrary orchestrator admission/removal | unanimous dual-Safe + hold (3-phase); `MAX_ORCHESTRATORS(64)`; re-admit identity reset (T10) | ✅ (needs both Safe keys — private-key security is a protocol premise) |
+| `freeze` / `unfreeze` | compromised owner | suspend/restore orchestrator; freeze keeps slot (D2) | unanimous + hold; freeze-history arrays enable `_frozenAtPostEnd` snapshot | ✅ |
+| `replace` | compromised owner | identity transfer (frozen state + bindings) | unanimous + hold; alias chain (`_resolve`) keeps binding resolution correct; re-admit reset | ✅ |
+| `reassignBinding` | compromised owner | disputed-pair reassignment | unanimous + hold; target must be admitted | ✅ |
+| `replaceOwner` | compromised owner | owner rotation | unanimousNoHold (immediate) + `isProbablyASafe`; `CannotRemoveLastOwner` protects the last owner | ✅ (E1 added; rotation only, n-of-n loss is a protocol premise) |
+| `setAdmittedLists` / `setPricingParams` | compromised owner | allowlist / pricing-parameter manipulation | unanimous + hold; `MAX_ALLOWLIST(64)`; pricing bounds (`minLot ≤ MAX_LOT_USD`, `priceBand ≤ BASIS_POINTS`, `maxPricePeriods > 0`) | ✅ |
+| `cancelPending` | compromised owner | veto queued change | `_veto` requires `msg.sender.isOwner()` | ✅ |
+| `correctVolume` | compromised owner | overwrite posted volume (governance path into FPV) | unanimousNoHold + in-body `_inVerificationWindow`; same `_validateFpvBounds` as postVolume (A1) | ✅ (bidirectional correction by design, D3a) |
+| `finalizeConversion` | external caller | trigger conversion early? | `_afterBinding` gate (E+POST+VERIFY); idempotent; permissionless → no privilege/MEV | ✅ |
+| `submitShares` | external caller | trigger share settlement | `_afterBinding` gate; permissionless; frozen snapshot from E+POST instant (timing-independent); all-zero → burn (D1) | ✅ |
+
+**S4 conclusion**: every external write function is closed against a malicious internal party — either by unanimous dual-Safe governance (owner surface), or by code-enforced input bounds + timing gates (orchestrator surface). The only residual exposures are protocol-layer premises (dual-Safe private-key security; f02 wire contract), not contract-layer vulnerabilities.
+
+### 5.14 Reviewer Checklist (S5, challenge-the-premise)
+
+> **S5 fix**: review PASS must no longer default-trust a document's "Safe" mark — the checklist forces the reviewer to verify each claim's premise is enforced in code.
+
+- [ ] **S5.1 — Security-claim → code map**: for every "Safe"/"Conditionally safe" conclusion in §5.1, the cited code-enforcement point must exist and match the claim (no enforcement reference = review fails). The §5.1 table is the map; verify at least rows 2/3/4 against the source.
+- [ ] **S5.2 — Evidence conditions**: every verification evidence (Halmos symbolic domain, fuzz sampling domain, invariant bound) must have its applicability condition annotated, and the condition must be satisfied by the code (e.g. the fuzz domain `(0,1e30)` equals the enforced `MAX_STABLE_USD`; the Halmos `1e3` symbolic domain is a proportional-space proof with the absolute domain covered by §5.5 domain-math bounds). A proof whose premise is not code-enforced is inadmissible (§5.5 row 4, §4.3.8 S3 note).
+- [ ] **S5.3 — Adversarial internal party**: the threat matrix (§5.13) must include the malicious-orchestrator and compromised-owner parties for every external write function; a function missing from the matrix is a review finding.
+- [ ] **S5.4 — Adversarial input coverage**: the S1 adversarial suite must cover every external write function's numeric/address/array parameters at their boundary values (0 / 1 / limit / limit+1 / max / zero-address); a parameter class not exercised at its boundary is a review finding.
+- [ ] **S5.5 — Test-claim correspondence**: every test asserted in §4 must be runnable and green; a test whose assertion cannot be invalidated (e.g. bare `expectRevert`) does not count as coverage.
+- [ ] **S5.6 — Regression after hardening**: any new audit finding (V1/V2/V3-style) must first add a Red regression test, then fix, then re-run the full suite (295 SRA+existing + 5 invariant, incl. the 28-test adversarial matrix) — no finding is closed by documentation alone.
 
 ## 6. References
 

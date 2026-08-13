@@ -88,9 +88,26 @@ contract ServiceRewardsActor is UnanimousGovernance {
     ///        - _finalizeConversion (V2): attoFil × lotUsd ≤ 1e27×1e30 = 1e57 ≪ 2^256
     ///        - _computeShares (V3): usd per orchestrator ≤ 1e30 + 32×1e57 ≈ 3.3e58 < 2^256/1e18;
     ///          total (≤ 64) ≤ 64×3.3e58 ≈ 2.1e60 ≪ 2^256
+    ///
+    ///      Magnitude rationale (why 1e30 / 1e27, and why MAX_CLAIM_FIL is not tightened to the FIL supply):
+    ///        - Loose-by-design: the assumed business domain is ~1e6 USD/quarter (§5.5); 1e30 is ~24 orders
+    ///          of magnitude above it (≈ 1e16 × Earth's annual GDP). The bounds are immutable `constant`s,
+    ///          so the looseness is a conscious trade — permanent headroom instead of a tight-but-risky cap —
+    ///          while the arithmetic chain above still closes with ≥ 3.5× headroom at its tightest link (V3).
+    ///        - MAX_ATTO_FIL = 1e27 (= 1e9 FIL) is the chain's keystone and its only *physical* bound:
+    ///          Filecoin's total supply is ~2e9 FIL, so a single print's attoFil can never exceed 1e9 FIL.
+    ///          Loosening it to 1e30 would make per-orchestrator usd ≈ 3.2e61 > 2^256/1e18 and re-open V3.
+    ///        - MAX_CLAIM_FIL = 1e30 is intentionally left at the symmetric value: claimFil sits in the
+    ///          *denominator* of _finalizeConversion (`attoFil × lotUsd / claimFil` — larger only shrinks
+    ///          the result; the only dangerous value is 0, guarded by ZeroClaimFil), and in _checkPriceBand
+    ///          the product 1e30×1e30×12000 ≈ 1.2e64 still leaves ~13 orders of magnitude below 2^256.
+    ///          Tightening it would buy no additional arithmetic safety.
+    ///      ⚠️ Maintenance: the closure assumes all four bounds + MAX_PRICE_PERIODS(32) + MAX_ORCHESTRATORS(64)
+    ///      hold together. If any of these is ever changed, re-derive the chain (§5.5) before shipping —
+    ///      the links are interdependent, not independent.
     uint256 private constant MAX_STABLE_USD = 1e30; // stablecoin face USD per quarter per orchestrator
     uint256 private constant MAX_LOT_USD = 1e30; // lot face value USD per print
-    uint256 private constant MAX_CLAIM_FIL = 1e30; // claim FIL (attoFIL) per print — bounds the band-check products (V1)
+    uint256 private constant MAX_CLAIM_FIL = 1e30; // claim FIL per print — bounds the band-check products (V1); denominator in V2 (larger = safer)
     uint256 private constant MAX_ATTO_FIL = 1e27; // = 1e9 FIL per print — network supply is ~2e9 FIL (V2)
 
     uint64 private immutable EPOCHS_PER_QUARTER;
