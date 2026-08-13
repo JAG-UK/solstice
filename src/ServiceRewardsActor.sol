@@ -547,7 +547,9 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
         Share[] memory shares;
         if (total == 0) {
-            // 🔍 D1 all-zero burn: the quarter's service stream is burned (mock verified accepting f099 as a valid recipient)
+            // 🔍 D1 all-zero burn: the quarter's service stream is burned (mock verified accepting f099 as a valid
+            // recipient; f02 is expected to special-case f099 via SubmitShares — FIP-0118 tracks immediate burn
+            // accounting without Claim, see docs/sra-design.md §3.1 D1)
             shares = new Share[](1);
             shares[0] = Share({wallet: BURN_ADDRESS, share: SHARE_TOTAL});
         } else {

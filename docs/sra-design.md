@@ -293,6 +293,7 @@ submitShares(Q):
 - **Decision**: when the sum of all orchestrator FPVs in a quarter is 0, `SubmitShares` submits `[{f099, 1e18}]` and the quarter's service stream is burned.
 - **Rationale**: when nobody posted or all are frozen/excluded there is no legitimate share recipient; f099 (burn actor) is an explicit ownerless target, while guaranteeing the Σ shares == 1e18 constraint holds and the service stream does not linger.
 - **Impact**: depends on the assumption "f099 can be resolved by f02 to a valid recipient" — verified by mock tests (`test_SubmitShares_AllZero_BurnsToF099` / `AllFrozen_BurnsToF099` both assert the mock accepts f099). Alternatives (revert / skip) rejected.
+- **FIP follow-up ([FIP-0118](https://github.com/filecoin-project/FIPs/pull/1270))**: the burn semantics are to be updated at the FIP level — the burn should happen immediately and be accounted in f02 state as burn, without requiring a `Claim([f099])`. f02 is expected to special-case f099 arriving via `SubmitShares` (covered by the mock tests above). The SRA implementation stays unchanged until the FIP text lands.
 
 #### D2 Orchestrator Cap 64
 
