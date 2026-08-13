@@ -363,7 +363,9 @@ contract SRASharesTest is SRATestBase {
     // ------------------------------------------------------------------------
 
     /// G7: core invariant of share computation with 3 random usdValues: Σ shares always exactly == 1e18.
-    /// usdValue bounded < 1e30 to prevent overflow in _computeShares's usds[i]*SHARE_TOTAL (=1e48 < 2^256).
+    /// Sampling domain (0, 1e30) aligns with the code-enforced MAX_STABLE_USD (audit V1/V2/V3 fix):
+    /// _validateFpvBounds rejects stableUSD > 1e30 at postVolume, so this fuzz domain equals the
+    /// contract's enforced input domain — not a test-side shrink to dodge overflow (S3 evidence-condition fix).
     function test_SubmitShares_Fuzz_SumAlwaysExact(uint256 v1, uint256 v2, uint256 v3) public {
         vm.assume(v1 > 0 && v1 < 1e30);
         vm.assume(v2 > 0 && v2 < 1e30);

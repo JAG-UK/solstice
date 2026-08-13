@@ -250,6 +250,8 @@ contract SRAInvariantHandler is SRATestBase {
         uint64 qq = uint64(bound(q, 0, MAX_Q));
         address orch = _pickOrch(orchIdx);
         if (!sra.isAdmitted(orch) || sra.isFrozen(orch) || _posted[qq][orch]) return;
+        // S3: bound(1, 1e30) aligns with the code-enforced MAX_STABLE_USD (postVolume rejects > 1e30) —
+        // the invariant's sampling domain equals the contract's enforced input domain.
         uint256 stableUsd = bound(usd, 1, 1e30);
         vm.roll(_qEnd(qq) + 1 + uint64(bound(usd, 0, POST_PERIOD - 1)));
         vm.prank(orch);
@@ -262,6 +264,7 @@ contract SRAInvariantHandler is SRATestBase {
         uint64 qq = uint64(bound(q, 0, MAX_Q));
         address orch = _pickOrch(orchIdx);
         if (!sra.isAdmitted(orch)) return;
+        // S3: bound(1, 1e30) aligns with the code-enforced MAX_STABLE_USD (correctVolume rejects > 1e30).
         uint256 stableUsd = bound(usd, 1, 1e30);
         vm.roll(_qPostEnd(qq) + 1 + uint64(bound(usd, 0, VERIFICATION_WINDOW - 1)));
         FPV memory fpv = _fpv(stableUsd);
