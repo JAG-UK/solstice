@@ -515,6 +515,18 @@ contract SRAQuarterTest is SRATestBase {
         sra.setPricingParams(MIN_LOT, 10001, MAX_PRICE_PERIODS);
     }
 
+    /// B1: setPricingParams with minLot above MAX_LOT_USD reverts InvalidParameter at body execution
+    ///     (prevents silent FIL-pricing loss: minLot=max would skip every print with lotUsd <= MAX_LOT_USD).
+    function test_SetPricingParams_MinLotTooLarge_Reverts() public {
+        vm.prank(owner1);
+        sra.setPricingParams(1e30 + 1, PRICE_BAND, MAX_PRICE_PERIODS);
+        vm.prank(owner2);
+        sra.setPricingParams(1e30 + 1, PRICE_BAND, MAX_PRICE_PERIODS);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        sra.setPricingParams(1e30 + 1, PRICE_BAND, MAX_PRICE_PERIODS);
+    }
+
     /// G1: the new priceBand applies to subsequent prints — a +20% deviation accepted under the old band ±20%
     ///      is rejected after the band changes to ±10% (reference 1000 unchanged; control is G3 ExactlyPlusBand).
     function test_SetPricingParams_NewBand_AppliesToNewPrints() public {

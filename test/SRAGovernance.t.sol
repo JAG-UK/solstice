@@ -13,8 +13,9 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
-import {FPV} from "../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor, FPV} from "../src/ServiceRewardsActor.sol";
 import {UnanimousGovernance} from "../src/lib/UnanimousGovernance.sol";
+import {IsASafe} from "../src/lib/IsASafe.sol";
 
 contract SRAGovernanceTest is SRATestBase {
     // ------------------------------------------------------------------------
@@ -213,6 +214,142 @@ contract SRAGovernanceTest is SRATestBase {
         // execution succeeded: no revert means the allowlist update took effect (setAdmittedLists is an exclusive update).
         // verified via the isStablecoinAdmitted read-only view (design §2.3.5 supplementary view).
         assertTrue(sra.isStablecoinAdmitted(usdc));
+    }
+
+    // ------------------------------------------------------------------------
+    // E1: replaceOwner (owner rotation, unanimousNoHold path — aligned with upstream SWA)
+    // ------------------------------------------------------------------------
+
+    /// E1: replaceOwner uses unanimousNoHold — the second approval executes immediately,
+    ///     revoking the old owner and adding the new Safe; the old owner can no longer vote,
+    ///     the new owner can (behavioral ownership assertion, matching SWA which exposes no isOwner view).
+    function test_ReplaceOwner_SecondApproval_ExecutesImmediately() public {
+        address newOwner = _makeSafeOwner("sra-owner3");
+
+        vm.prank(owner1);
+        sra.replaceOwner(owner1, newOwner); // first vote only: not a full vote, ownership unchanged
+        vm.prank(owner2);
+        sra.replaceOwner(owner1, newOwner); // second vote executes immediately (unanimousNoHold)
+
+        // old owner revoked: owner1 can no longer vote on a fresh governance task
+        vm.prank(owner1);
+        vm.expectRevert(abi.encodeWithSelector(UnanimousGovernance.NotOwner.selector, owner1));
+        sra.admit(makeAddr("orch-after-rotation"));
+
+        // new owner active: newOwner's first vote on a fresh task succeeds
+        vm.prank(newOwner);
+        sra.admit(makeAddr("orch-new-owner-vote")); // no revert => newOwner is an owner
+    }
+
+    /// E1: a non-Safe newOwner is rejected — NotSafeProxy at body execution (second approval).
+    function test_ReplaceOwner_NonSafeNewOwner_Reverts() public {
+        address badOwner = makeAddr("not-safe");
+
+        vm.prank(owner1);
+        sra.replaceOwner(owner1, badOwner); // first vote OK (approve only, body not executed)
+        vm.prank(owner2);
+        vm.expectRevert(abi.encodeWithSelector(IsASafe.NotSafeProxy.selector, badOwner));
+        sra.replaceOwner(owner1, badOwner); // second vote: body executes -> NotSafeProxy revert
+
+        // ownership unchanged after the failed rotation
+        vm.prank(owner1);
+        sra.admit(makeAddr("orch-still-owner1")); // owner1 still an owner: no revert
+    }
+
+    /// E1: a non-owner calling replaceOwner is rejected on the first vote (NotOwner).
+    function test_ReplaceOwner_NonOwner_Reverts() public {
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(UnanimousGovernance.NotOwner.selector, stranger));
+        sra.replaceOwner(owner1, makeAddr("new-owner"));
+    }
+
+    // ------------------------------------------------------------------------
+    // E2: constructor parameter validation (deployment-time bounds, aligned with setPricingParams)
+    // ------------------------------------------------------------------------
+
+    /// E2: the constructor rejects invalid configuration — priceBand > BASIS_POINTS / maxPricePeriods=0 /
+    ///     minLot > MAX_LOT_USD / epochsPerQuarter=0 (each reverts InvalidParameter at deploy).
+    function test_Constructor_InvalidParams_Reverts() public {
+        // priceBand > BASIS_POINTS
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        new ServiceRewardsActor(
+            owner1,
+            owner2,
+            EPOCHS_PER_QUARTER,
+            POST_PERIOD,
+            VERIFICATION_WINDOW,
+            SRA_CANCEL_HOLD,
+            ACTIVATION_EPOCH,
+            MIN_LOT,
+            10001,
+            MAX_PRICE_PERIODS
+        );
+
+        // maxPricePeriods == 0
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        new ServiceRewardsActor(
+            owner1,
+            owner2,
+            EPOCHS_PER_QUARTER,
+            POST_PERIOD,
+            VERIFICATION_WINDOW,
+            SRA_CANCEL_HOLD,
+            ACTIVATION_EPOCH,
+            MIN_LOT,
+            PRICE_BAND,
+            0
+        );
+
+        // minLot > MAX_LOT_USD
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        new ServiceRewardsActor(
+            owner1,
+            owner2,
+            EPOCHS_PER_QUARTER,
+            POST_PERIOD,
+            VERIFICATION_WINDOW,
+            SRA_CANCEL_HOLD,
+            ACTIVATION_EPOCH,
+            1e30 + 1,
+            PRICE_BAND,
+            MAX_PRICE_PERIODS
+        );
+
+        // epochsPerQuarter == 0
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        new ServiceRewardsActor(
+            owner1,
+            owner2,
+            0,
+            POST_PERIOD,
+            VERIFICATION_WINDOW,
+            SRA_CANCEL_HOLD,
+            ACTIVATION_EPOCH,
+            MIN_LOT,
+            PRICE_BAND,
+            MAX_PRICE_PERIODS
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // F2: setAdmittedLists allowlist array-length bound
+    // ------------------------------------------------------------------------
+
+    /// F2: setAdmittedLists with an allowlist array above MAX_ALLOWLIST (64) reverts InvalidParameter at body execution.
+    function test_SetAdmittedLists_TooManyEntries_Reverts() public {
+        address[] memory stablecoins = new address[](65);
+        for (uint256 i = 0; i < stablecoins.length; i++) {
+            stablecoins[i] = makeAddr(string.concat("coin", vm.toString(i)));
+        }
+
+        vm.prank(owner1);
+        sra.setAdmittedLists(stablecoins, new address[](0));
+        vm.prank(owner2);
+        sra.setAdmittedLists(stablecoins, new address[](0));
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        sra.setAdmittedLists(stablecoins, new address[](0));
     }
 
     // ------------------------------------------------------------------------

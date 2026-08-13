@@ -22,7 +22,7 @@ Core features:
 
 - Scope: all key decisions for Issue #4, from design to PR.
 - Decision groups used throughout: **D** design decisions (settled) | **S** structural decisions (approval) | **C** conflict rulings (found test-first) | **T** test decisions (defect fixes) | **G** coverage-gap closures | **I/R** implementation-layer risks and mitigations.
-- Status: all landed — design approved and converged; implementation **255/255 tests Green** (104 SRA deterministic + 5 invariant + 146 existing); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS + quarter-window 4/4 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; spec-conformance deviations A/B/C/D/E reviewed by the user one by one and uniformly landed (T11).
+- Status: all landed — design approved and converged; implementation **267/267 tests Green** (118 SRA deterministic + 5 invariant + 144 existing); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS + quarter-window 4/4 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; spec-conformance deviations A/B/C/D/E reviewed by the user one by one and uniformly landed (T11); audit hardening V1/V2/V3 (overflow DoS) + B1/C1/E1/E2/F2 (remaining input-domain bounds) landed.
 
 ### 1.3 Source Annotation System
 
@@ -57,9 +57,9 @@ Used throughout this document:
 
 **Governance hold parameter (✏️ needs approval)**: SRA governance operations enforce `SRA_CANCEL_HOLD` at the contract level (unlike the SWA, which relies on f02's SWA_TIMELOCK — 📘 that is why the SWA uses unanimousNoHold). Suggested SRA_CANCEL_HOLD = 7 days (consistent with the spec's suggested verification window length, 📄 §3.2).
 
-### 2.3 Method Interfaces (14 writes + 1 read)
+### 2.3 Method Interfaces (15 writes + 1 read)
 
-> Scope note: **14 writes = 12 core writes + 2 auxiliary writes**. The 12 core writes are the methods in §2.3.1-2.3.4 other than the 2 auxiliaries below (registerPairs/postVolume/admit/remove/freeze/unfreeze/replace/reassignBinding/setAdmittedLists/setPricingParams/correctVolume/submitShares); the 2 auxiliary writes are `cancelPending` (governance veto auxiliary, exposes 📘 `_veto`) and `finalizeConversion` (permissionless mechanism trigger; submitShares can auto-trigger it). The earlier "12 writes" scope did not count these two.
+> Scope note: **15 writes = 12 core writes + 2 auxiliary writes + 1 audit-added governance write**. The 12 core writes are the methods in §2.3.1-2.3.4 other than the 2 auxiliaries below (registerPairs/postVolume/admit/remove/freeze/unfreeze/replace/reassignBinding/setAdmittedLists/setPricingParams/correctVolume/submitShares); the 2 auxiliary writes are `cancelPending` (governance veto auxiliary, exposes 📘 `_veto`) and `finalizeConversion` (permissionless mechanism trigger; submitShares can auto-trigger it); the audit-added write is `replaceOwner` (E1 owner rotation, aligned with upstream SWA — the spec's §4.2 method list does not name it, but the shared governance model needs an owner-rotation path). The earlier "14 writes" scope (12 core + 2 auxiliary) did not count `replaceOwner`.
 > Semantics source 📄 §4.2 method list; **Solidity signatures are ✏️ design derivation (the spec gives only method names and prose) — ✅ S1 approved** (approval record in §3.2).
 
 #### 2.3.1 Orchestrator operations (called by self, no governance)
@@ -81,6 +81,7 @@ Used throughout this document:
 | `reassignBinding` | `reassignBinding(address payer, address operator, address orch)` | Disputed pair reassignment; volume is credited to the new orchestrator from the change epoch onward (📄 §4.2) |
 | `setAdmittedLists` | `setAdmittedLists(address[] calldata stablecoins, address[] calldata filecoinPayContracts)` | Updates the stablecoin + Filecoin Pay allowlists (📄 §4.2) |
 | `setPricingParams` | `setPricingParams(uint256 minLot, uint256 priceBand, uint256 maxPricePeriods)` | Updates the FIL pricing parameters MIN_LOT/PRICE_BAND/MAX_PRICE_PERIODS (📄 §3.3: all three are SRA state settable by governance) |
+| `replaceOwner` | `replaceOwner(address prevOwner, address newOwner)` | **Owner rotation (audit E1, unanimousNoHold path)**: dual-Safe, effective immediately; newOwner must be a Safe proxy; revokes prevOwner and adds newOwner (aligned with upstream SWA) |
 | `cancelPending` | `cancelPending(bytes32 taskId)` | Either Safe calls `_veto` alone to discard a queued change (📄 §4.2 + 📘 _veto) |
 
 > `setPricingParams` is the governance power implied by spec §3.3/§5.2 ("FIL pricing parameters... can be set by SRA Governance"), not named in the spec's method list — **✏️ design derivation**.
@@ -258,6 +259,7 @@ submitShares(Q):
 |-------------------|----------|------|-------|
 | admit/remove/freeze/unfreeze/replace/reassignBinding/setAdmittedLists/setPricingParams | `unanimous(keccak256(msg.data), SRA_CANCEL_HOLD)` | yes | two votes + permissionless completion after hold |
 | correctVolume | `unanimousNoHold(keccak256(msg.data))` | no | the window is the hold (📄 §5.3); validates the verification window in the function body |
+| replaceOwner (audit E1) | `unanimousNoHold(keccak256(msg.data))` | no | owner rotation, effective immediately (aligned with upstream SWA) |
 | cancelPending | `_veto(taskId)` | — | either Safe cancels alone (📄 §4.2) |
 
 - **taskId = keccak256(msg.data)** (📘): both Safes must submit byte-identical calldata; methods with array parameters like `setAdmittedLists` require a normalization convention (sorting, consistent encoding) — 🔍 I2 risk; tests must cover dual-Safe calls
@@ -314,7 +316,7 @@ submitShares(Q):
 
 #### S1 Method Signatures (✅ approved)
 
-- **Decision**: Solidity types for all 14 writes + 1 read (12 core writes + 2 auxiliary writes: cancelPending governance veto, finalizeConversion mechanism trigger). Sub-decisions: A. `setPricingParams` as an independent method (not merged into setAdmittedLists; parameter domains separate); B. `correctVolume` takes the full FPV structure (whole replacement; no USD-value concept within the window, only raw components can be corrected); C. `Q` as uint64 (sufficient quantization headroom; `Q × EPOCHS_PER_QUARTER` uses a uint256 intermediate to guard overflow).
+- **Decision**: Solidity types for all 15 writes + 1 read (12 core writes + 2 auxiliary writes: cancelPending governance veto, finalizeConversion mechanism trigger; + 1 audit-added governance write: replaceOwner owner rotation, E1). Sub-decisions: A. `setPricingParams` as an independent method (not merged into setAdmittedLists; parameter domains separate); B. `correctVolume` takes the full FPV structure (whole replacement; no USD-value concept within the window, only raw components can be corrected); C. `Q` as uint64 (sufficient quantization headroom; `Q × EPOCHS_PER_QUARTER` uses a uint256 intermediate to guard overflow).
 - **Rationale**: the spec gives only method names and prose; signatures are design derivations; parameter-domain separation lowers governance coupling; the full FPV structure supports correction scenarios.
 - **Impact**: method set and ABI finalized; C1 later adjusts `registerPairs` to a named struct (Solidity compile limitation); C8 environment issue resolved via the forge upgrade.
 
@@ -451,11 +453,11 @@ submitShares(Q):
 | S | S8 | ✅ aligned per deviation D (anchored reference, see T11; the original "spec agreement" old solution revoked) |
 | S | S3 / S4 / S6 / S9 / S10 / S11 / S12 | ⏳ not individually reviewed (standard practice, verified by the implementation) |
 | C | C1-C8 | ✅ ruled and landed (C8 closed with the forge 1.7.1 upgrade; C7 superseded by deviation-A alignment) |
-| T | T2-T11 | ✅ disposed (T6/T10 implementation defects, TDD fix; T7-T9 correctness assurance landed; T11 spec-conformance alignment A/B/D + C/E clarification) |
-| G | G1-G7 | ✅ closed (58 → 74 → 77 → 91 → 94 → 96 → 100 → 103 → 109 tests) |
+| T | T2-T11 | ✅ disposed (T6/T10 implementation defects, TDD fix; T7-T9 correctness assurance landed; T11 spec-conformance alignment A/B/D + C/E clarification; post-review audit hardening V1/V2/V3 + B1/C1/E1/E2/F2 landed as T12) |
+| G | G1-G7 | ✅ closed (58 → 74 → 77 → 91 → 94 → 96 → 100 → 103 → 109 → 123 tests) |
 | I/R | I1 / I2 / I5 / R1 | ✅ mitigations landed (tests + implementation semantics double assurance) |
 
-**Final acceptance**: the implementation aligns with all design rulings, and the spec-conformance deviations A/B/C/D/E were reviewed by the user one by one and uniformly landed (T11); **255/255 tests Green** (104 SRA deterministic + 5 invariant + 146 existing); SRA line coverage 100%, branch 67.16% (tool statistical ceiling; governance function-body require branches under-counted by the lcov modifier quirk); `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; aggregatedFPV read auto-triggers finalize, PRICE_BAND anchored reference, and MIN_LOT filtering all locked by targeted tests.
+**Final acceptance**: the implementation aligns with all design rulings, and the spec-conformance deviations A/B/C/D/E were reviewed by the user one by one and uniformly landed (T11); **267/267 tests Green** (118 SRA deterministic + 5 invariant + 144 existing); SRA line coverage 100%, branch 67.16% (tool statistical ceiling; governance function-body require branches under-counted by the lcov modifier quirk); `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; aggregatedFPV read auto-triggers finalize, PRICE_BAND anchored reference, and MIN_LOT filtering all locked by targeted tests; audit hardening V1/V2/V3 (overflow DoS, input-domain bounds) and B1/C1/E1/E2/F2 (remaining bounds + owner rotation) landed with 6 + 8 regression tests.
 
 ## 4. Test Strategy and Coverage
 
@@ -464,16 +466,17 @@ submitShares(Q):
 | File | Responsibility | Test functions | Strategy points covered |
 |------|----------------|----------------|------------------------|
 | `test/SRATestBase.sol` | Common base: deploy SRA, build Safe owners, register service stream 2, quarterly time utilities, governance helpers | — (not a test) | — |
-| `test/SRAGovernance.t.sol` | Governance flow | 11 | 6 |
-| `test/SRARegistry.t.sol` | Orchestrator registry + freeze + cap | 26 | 3, 5 |
-| `test/SRAQuarter.t.sol` | Quarter state machine + FPV + FIL pricing (incl. A/B/D deviation-alignment tests) | 43 | 2, 7, 8, 9, 11 |
+| `test/SRAGovernance.t.sol` | Governance flow | 16 | 6 |
+| `test/SRARegistry.t.sol` | Orchestrator registry + freeze + cap | 28 | 3, 5 |
+| `test/SRAQuarter.t.sol` | Quarter state machine + FPV + FIL pricing (incl. A/B/D deviation-alignment tests) | 44 | 2, 7, 8, 9, 11 |
 | `test/SRAShares.t.sol` | Share computation + burn + freeze snapshot + SetShares | 17 | 1, 3, 4, 10, 12 |
 | `test/SRAIntegration.t.sol` | **Integration contract tests** (simulate the SWA gating consumer of aggregatedFPV; deviation A disposition) | 4 | 11 |
+| `test/SRAOverflowDoS.t.sol` | **Overflow DoS regression tests** (audit findings V1/V2/V3 — anchor pollution / finalizeConversion overflow / _computeShares overflow; input-domain hardening) | 6 | 2, 8, 9 (overflow-DoS hardening) |
 | `test/SRAInvariant.t.sol` | **Invariant tests** (P1/A2/A3): handler random operations + 5 persistent invariants | 5 | I1 share conservation / I2 binding uniqueness / I3 governance consistency / A2 freeze-snapshot exclusion / A3 all-zero burn |
 | `test/differential/DifferentialShares.t.sol` | **Differential tests** (t1): Python independent reference model cross-validates three computation cores (largest-remainder / FPV aggregation / PRICE_BAND), breaking same-source bias | 3 | 1, 9, 8 (independent reference model) |
 | `test/halmos/QuarterWindowCheck.t.sol` | **State-machine symbolic verification** (blind spot 4 closed): Halmos formally proves parameter-independent quarter-window properties (T2a quarter boundary / T3 constant interval / T4 snapshot-time independence / T5b empty-history boundary); harness in `test/halmos/QuarterWindowHarness.sol` | 4 (halmos, not in the forge suite) | 2, 3, 4 (symbolic verification layer) |
 
-**109 forge test functions in total** (104 deterministic + 5 invariant; of the 104 deterministic, 101 are in the 5 SRA suites above and 3 are differential), plus 4 Halmos symbolic-verification checks (not in the forge suite); covers all 12 test strategies in §4.2 + 3 new persistent invariants from P1 + A2/A3 correctness invariants + A2 defect regression + integration contract tests + differential cross-validation + state-machine symbolic verification + A/B/D deviation alignment (after the spec-conformance review's unified implementation). Full suite: 109 SRA + 146 existing = **255 tests**.
+**123 forge test functions in total** (118 deterministic + 5 invariant; of the 118 deterministic, 109 are in the 5 SRA suites above, 6 are overflow-DoS regressions in `test/SRAOverflowDoS.t.sol`, and 3 are differential), plus 4 Halmos symbolic-verification checks (not in the forge suite); covers all 12 test strategies in §4.2 + 3 new persistent invariants from P1 + A2/A3 correctness invariants + A2 defect regression + integration contract tests + differential cross-validation + state-machine symbolic verification + A/B/D deviation alignment + overflow-DoS hardening (V1/V2/V3) + audit bound enforcement (B1/C1/E1/E2/F2). Full suite: 123 SRA + 144 existing = **267 tests**.
 
 ### 4.2 Strategy Point Coverage Matrix
 
@@ -655,6 +658,24 @@ PRICE_BAND cross-multiplication determination all consistent with the independen
 
 **C/E clarification (documentation)**: C — the on-chain rejection of filPeriods.length>MAX_PRICE_PERIODS is an enforcement of the spec's "at most MAX_PRICE_PERIODS entries" format requirement (adjacent-period merging is the off-chain indexer's job), not a deviation; E — Replace's identity transfer (alias chain + frozen state) is a necessary completion of the spec's intent, no literal spec conflict, status quo kept. See §2.5.4 and §3.4 (T11).
 
+#### 4.3.10 Post-Review Audit Hardening Registry (V1/V2/V3 + B1/C1/E1/E2/F2, 109 → 123 tests)
+
+> A second review of PR #24 (post-squash) probed three overflow-DoS findings (**V1 anchor pollution / V2 finalizeConversion overflow / V3 _computeShares overflow**) — all confirmed real: `postVolume`/`correctVolume` had **no business-domain upper bounds** on `stableUSD`/`lotUsd`/`claimFil`/`attoFil`, so the §5.5 "Integer overflow ✅ Safe" conclusion rested on an **unenforced "business domain ~1e6" assumption** (see the QA-system diagnosis: no adversarial-input test layer, hypothesis-driven security claims, evidence-application-condition breaks, single threat model — documented in `.ghost/references/016-sra-qa-review.md`). The user arranged the V1/V2/V3 fix; the remaining audit backlog (B1/C1/E1/E2/F2) was completed in this pass.
+
+**V1/V2/V3 — input-domain bounds enforced (fix commits `29293da` test + `ddbace4` fix)**:
+- Implementation: `_validateFpvBounds` now rejects `stableUSD > MAX_STABLE_USD(1e30)` / `lotUsd > MAX_LOT_USD(1e30)` / `claimFil > MAX_CLAIM_FIL(1e30)` / `attoFil > MAX_ATTO_FIL(1e27)` / `claimFil == 0` at **both** input entries (postVolume + correctVolume); `_updateLastBoundPrint` additionally refuses domain-out-of-range prints from becoming the anchor (deep defense)
+- Domain arithmetic: band products ≤ 1e30×1e30×12000 ≈ 1.2e64, finalize ≤ 1e27×1e30 = 1e57, per-orch usd ≤ 3.3e58, total ≤ 2.1e60 — all ≪ 2^256
+- Tests: `test/SRAOverflowDoS.t.sol` (6): V1 anchor-pollution permanent-DoS / V2 finalize-overflow DoS / V3 computeShares-overflow DoS (each with Panic(0x11) precise assertion + post-fix "system stays usable" control), plus claimFil==0 / correctVolume-entry / anchor-refusal cases
+
+**B1/C1/E1/E2/F2 — remaining bounds + owner rotation (this pass, 8 tests)**:
+- **B1** `setPricingParams`: adds `minLot <= MAX_LOT_USD` (was only `maxPricePeriods > 0 && priceBand <= BASIS_POINTS`) — prevents minLot=max from silently skipping every print (FIL-pricing silent loss) — `SRAQuarter:test_SetPricingParams_MinLotTooLarge_Reverts`
+- **C1** `registerPairs`: adds `pairs.length <= MAX_PAIRS(64)` with new `error TooManyPairs()` (aligns with MAX_ORCHESTRATORS; keeps the §5.5 DoS "traversals hard caps" premise) — `SRARegistry:test_RegisterPairs_TooManyPairs_Reverts` + `..._MaxPairs_Accepted` (64 boundary)
+- **E1** `replaceOwner(address prevOwner, address newOwner)` (new governance write, `unanimousNoHold`): owner rotation — newOwner must be a Safe proxy (`isProbablyASafe`), revokes prevOwner (`removeOwner`), adds newOwner; **byte-identical to upstream SWA's replaceOwner** — closes the "no owner-rotation path → owner compromise/loss cannot be contained" gap (E1; the n-of-n key-loss residual risk is a shared-model design choice, documented §5.6) — `SRAGovernance:test_ReplaceOwner_SecondApproval_ExecutesImmediately` + `..._NonSafeNewOwner_Reverts` + `..._NonOwner_Reverts`
+- **E2** constructor: adds the same parameter validation as setPricingParams (`maxPricePeriods > 0 && priceBand <= BASIS_POINTS && minLot <= MAX_LOT_USD`) plus `epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0` — deployment-time misconfiguration fails fast — `SRAGovernance:test_Constructor_InvalidParams_Reverts` (4 illegal configs)
+- **F2** `setAdmittedLists`: adds `stablecoins.length <= MAX_ALLOWLIST(64) && filecoinPayContracts.length <= MAX_ALLOWLIST` (other arrays already had 64/32 caps) — `SRAGovernance:test_SetAdmittedLists_TooManyEntries_Reverts`
+
+Final: SRA deterministic **118/118 Green** (SRAQuarter 44 + SRARegistry 28 + SRAShares 17 + SRAIntegration 4 + SRAGovernance 16 + SRAOverflowDoS 6 + differential 3), invariant 5/5, full suite **267/267** (123 SRA + 144 existing) no regression, `forge fmt --check` / `forge lint` clean.
+
 ### 4.4 Key Test Design Decisions
 
 #### 4.4.1 Test Constants (constructor config)
@@ -686,9 +707,9 @@ PRICE_BAND cross-multiplication determination all consistent with the independen
 
 ```bash
 # project foundry.toml usable directly (forge 1.7.1; P0 fixed fmt/lint)
-forge test --match-contract SRA          # SRA tests (104 deterministic + 5 invariant)
+forge test --match-contract SRA          # SRA tests (118 deterministic + 5 invariant)
 forge test --match-contract SRAInvariant # invariant only (~3 minutes)
-forge test                               # full suite (109 SRA + 146 existing = 255)
+forge test                               # full suite (123 SRA + 144 existing = 267)
 halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-timeout-branching 2000 --solver-timeout-assertion 60000   # state-machine symbolic verification (4/4)
 ```
 
@@ -704,7 +725,7 @@ halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-ti
 - **A2 contract tests (spec-conformance deviation A disposition, 96 → 100 tests)**: the spec-conformance matrix found deviation A — spec "reading AggregatedFPV triggers FinalizeConversion" vs implementation pure view (C7). The SWA reference implementation has no gating consumption code, so `test/SRAIntegration.t.sol` (§4.3.6) was added with the test contract simulating the gating consumer, initially locking the contract "finalize first then read == submitShares final value (no divergence)" (C1 verified via expectEmit negative testing). Design §2.3.5 gained the contract declaration. Final: SRA deterministic 95/95 Green, full suite 228/228 no regression, `forge fmt --check` clean.
 - **t1 (differential tests, 100 → 103 tests)**: breaking same-source bias (§4.3.7) — the Python independent reference model (derived from FIP-0118 mathematical semantics, not reading the Solidity implementation) cross-validates the three computation cores: largest-remainder share allocation (120 cases, incl. tie-breaking/extreme ratios/with-0), FPV aggregation (30 cases, incl. claim>1 integer rounding), PRICE_BAND determination (25 cases, incl. cold start/boundaries/reference chains). **175/175 all matched, no deviation found** — the implementation faithfully matches the spec's mathematical semantics; the same-source bias risk is substantially excluded. Cases seed=42 reproducible; `test/differential/DifferentialCases.sol` committed for CI. Final: SRA deterministic 98/98 Green, full suite 231/231 no regression, `forge fmt --check` clean, `.gas-snapshot` updated.
 - **State-machine symbolic verification (blind spot 4 closed, halmos not in the forge suite)**: formal verification for the quarter-window determination (§4.3.8) — Halmos proves 4 **parameter-independent** propositions (T2a quarter boundary / T3 constant interval / T4 snapshot-time independence / T5b empty-history boundary) **4/4 PASS**. The original T1/T5/T6 were downgraded due to halmos 0.1.13 tool limits (immutable symbolization / warp not supporting symbols / storage array element defect, confirmed by probe experiments), covered instead by dynamic tests (window boundary ±1 8 cases + freeze/unfreeze in both directions + invariant A2 random freeze history + 100% line coverage). The forge suite 231/231 is unaffected (halmos checks run only under halmos).
-- **Spec-conformance alignment (deviation A/B/D unified implementation, 103 → 109 tests)**: after the user reviewed the 5 deviations one by one (principle: spec alignment first), the unified implementation landed (§4.3.9) — **A** aggregatedFPV changed to non-view with read auto-triggering finalize (C3 rewrite locks "read yields the complete value"); **B** MIN_LOT filtering (sub-MIN_LOT prints do not participate in pricing: band check skipped, never become the reference, not counted in finalize; base-class MIN_LOT corrected to 100 USD); **D** PRICE_BAND anchored reference (reference update moved to quarter-binding finalize, preventing chained stepping within a single postVolume from pushing the anchor arbitrarily far). Differential model synced to anchor semantics (model 3 reference chain → anchor, model 2 + min_lot filter); 175 cases still all match. Final: SRA deterministic 104/104 Green (SRAQuarter 43 + SRARegistry 26 + SRAShares 17 + SRAIntegration 4 + SRAGovernance 11 + differential 3), invariant 5/5, full suite 255/255 (109 SRA + 146 existing) no regression, `forge fmt --check` clean.
+- **Spec-conformance alignment (deviation A/B/D unified implementation, 103 → 109 tests)**: after the user reviewed the 5 deviations one by one (principle: spec alignment first), the unified implementation landed (§4.3.9) — **A** aggregatedFPV changed to non-view with read auto-triggering finalize (C3 rewrite locks "read yields the complete value"); **B** MIN_LOT filtering (sub-MIN_LOT prints do not participate in pricing: band check skipped, never become the reference, not counted in finalize; base-class MIN_LOT corrected to 100 USD); **D** PRICE_BAND anchored reference (reference update moved to quarter-binding finalize, preventing chained stepping within a single postVolume from pushing the anchor arbitrarily far). Differential model synced to anchor semantics (model 3 reference chain → anchor, model 2 + min_lot filter); 175 cases still all match. Final: SRA deterministic 104/104 Green (SRAQuarter 43 + SRARegistry 26 + SRAShares 17 + SRAIntegration 4 + SRAGovernance 11 + differential 3), invariant 5/5, full suite 253/253 (109 SRA + 144 existing) no regression, `forge fmt --check` clean.
 
 ## 5. Security Review
 
@@ -722,7 +743,7 @@ halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-ti
 | 1 | Reentrancy | ✅ Safe | no value transfer; the only external call is an fvm precompile with no callback surface |
 | 2 | Denial of Service (DoS) | ⚠️ Conditionally safe | all traversals have hard caps (64/32); freeze-history arrays and the replace chain are theoretical growth points |
 | 3 | Access control | ✅ Safe | governance dual-Safe unanimous + hold; orchestrator self-operations gated; constructor validates Safe proxy |
-| 4 | Integer overflow | ✅ Safe | 0.8.x checked arithmetic fully on; cross-multiplication value domains safe; Halmos P6 no overflow |
+| 4 | Integer overflow | ✅ Safe | 0.8.x checked arithmetic fully on; **input-domain bounds enforced at the entries** (MAX_STABLE_USD=1e30 / MAX_LOT_USD=1e30 / MAX_ATTO_FIL=1e27 / MAX_CLAIM_FIL=1e30, audit V1/V2/V3 fix); Halmos P6 no overflow |
 | 5 | Encoding and boundaries (ABI/CBOR) | ⚠️ Conditionally safe | input side protected by the ABI decoder; output side bounded CBOR; wire contract pending f02 implementation check |
 | 6 | Precision issues | ✅ Safe | floor + largest-remainder Σ==1e18; rational rates; Halmos conservation/monotonicity/floor bound |
 | 7 | Governance path | ✅ Safe | three-phase + dual Safe + event traceability; re-admit semantics closed after T10 |
@@ -789,11 +810,23 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
 
 ### 5.5 Integer Overflow
 
-**Conclusion: ✅ Safe (0.8.x checked arithmetic fully on + value-domain analysis + symbolic verification)**
+**Conclusion: ✅ Safe — conditional on the input-domain upper bounds enforced at the entries (audit V1/V2/V3 fix)**:
+`MAX_STABLE_USD = 1e30` / `MAX_LOT_USD = 1e30` / `MAX_ATTO_FIL = 1e27` / `MAX_CLAIM_FIL = 1e30`, validated by
+`_validateFpvBounds` in `postVolume`/`correctVolume`, locked by the `SRAOverflowDoS.t.sol` regression tests (6 cases).
 
 **Basis**:
 
 - **Checked arithmetic**: Solidity 0.8.36 reverts on overflow by default; the whole contract has **no `unchecked` blocks**; Slither did not trigger unchecked/integer-overflow detectors.
+- **Input-domain bounds (audit V1/V2/V3 fix)**: the §5.5 "business domain ~1e6" assumption is now **enforced at the code level** by `_validateFpvBounds` (rejects `stableUSD > MAX_STABLE_USD`, `lotUsd > MAX_LOT_USD`, `claimFil > MAX_CLAIM_FIL`, `attoFil > MAX_ATTO_FIL`, `claimFil == 0` at both input entries). The bound chain closes the overflow arithmetic:
+  - `_checkPriceBand` (V1): `lotUsd × claimFil × (BASIS_POINTS+band) ≤ 1e30×1e30×12000 ≈ 1.2e64 ≪ 2^256`;
+  - `_finalizeConversion` (V2): `attoFil × lotUsd ≤ 1e27×1e30 = 1e57 ≪ 2^256` (`MAX_ATTO_FIL = 1e27` ≈ 1e9 FIL — network supply is ~2e9 FIL, a single print physically cannot exceed it);
+  - `_computeShares` (V3): per-orchestrator usd ≤ `1e30 + 32×1e57 ≈ 3.3e58 < 2^256/1e18`; total (≤ 64) ≤ `2.1e60 ≪ 2^256`.
+  - Deep defense: `_updateLastBoundPrint` also skips out-of-domain prints, so the PRICE_BAND anchor can never be polluted even via a future entry bypassing `_validateFpvBounds`.
+- **Other input-domain bounds (audit B1/C1/E2/F2)**: beyond the FPV value fields, the remaining length/value inputs are bounded so the "DoS conditionally safe (traversals hard caps 64/32)" premise holds everywhere:
+  - **B1** `setPricingParams` validates `minLot <= MAX_LOT_USD` (a minLot=max would silently skip every print with lotUsd ≤ MAX_LOT_USD — FIL pricing silent loss, worse than a revert);
+  - **C1** `registerPairs` validates `pairs.length <= MAX_PAIRS(64)` (`error TooManyPairs`), aligned with MAX_ORCHESTRATORS;
+  - **F2** `setAdmittedLists` validates `stablecoins.length <= MAX_ALLOWLIST(64) && filecoinPayContracts.length <= MAX_ALLOWLIST`;
+  - **E2** the constructor validates the same pricing-parameter bounds as setPricingParams plus `epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0` — deployment misconfiguration fails fast instead of silently misbehaving.
 - **Share computation**: `_computeShares`'s `usds[i] * SHARE_TOTAL` (×1e18) — usd aggregation at business magnitude ~1e6 (USD face value); 1e6 × 1e18 = 1e24 ≪ 2^256 ≈ 1.16e77; Halmos P6 `check_NoOverflow_Boundary` proves no overflow within the symbolic domain (012 report §C1).
 - **Window computation**: `_qEnd` uses `uint256(ACTIVATION_EPOCH) + uint256(q) * uint256(EPOCHS_PER_QUARTER)` as an intermediate guard (S1C, §2.5.1), then casts to Epoch(uint96).
 - **PRICE_BAND cross-multiplication**: `_checkPriceBand`'s `lhs = p.lotUsd * lastClaimFil * BASIS_POINTS` (domain ~1e18 × 1e18 × 1e4 = 1e40 < 2^256), and `priceBand ≤ BASIS_POINTS` is validated by `setPricingParams` (`InvalidParameter`).
@@ -832,7 +865,7 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
 - **FIL→USD conversion**: `usd += attoFil × lotUsd / claimFil` integer multiply/divide (S9 rational rates, no floating point), covered by `test_FinalizeConversion_IntegerPrecision` (1000/3 non-divisible).
 - **PRICE_BAND comparison**: cross-multiplication `lhs ≥ lower && lhs ≤ upper` avoids division precision loss (G3 exact ±20% boundary tests cover the boundary-inclusive semantics).
 
-**Residual risk**: none substantive. The Halmos value-domain constraint is 1e3 (shares depend only on usd ratios rather than absolute values; tightening does not weaken verification strength; 012 report §C1 "value-domain constraint note") — proving over the full uint256 domain would require extended solver timeouts (significant cost, marginal benefit).
+**Residual risk**: none substantive. The Halmos value-domain constraint is 1e3 — **this only certifies the share-allocation ratio properties** (shares depend only on usd ratios rather than absolute values); the no-overflow property over absolute magnitudes is now covered by the **entry-enforced input-domain bounds** (`_validateFpvBounds`, audit V1/V2/V3 fix) rather than by the 1e3-domain Halmos proof, which does not weaken the ratio-space coverage (012 report §C1 "value-domain constraint note") — proving over the full uint256 domain would require extended solver timeouts (significant cost, marginal benefit).
 
 ### 5.8 Governance Path
 
@@ -910,7 +943,7 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
 #### Coverage and statistics notes
 
 - SRA line coverage **100%**, statements 99.45%, functions 100%; branch 67.16% (`forge coverage`) is the **tool's statistical ceiling** — require branches of governance function bodies with the `unanimous`/`unanimousNoHold` modifier are all recorded as 0 in lcov (including remove NotAdmitted / reassignBinding NotAdmitted / replace AlreadyAdmitted / setPricingParams InvalidParameter, which G6 explicitly tests); an lcov quirk for modifier-inlined function bodies, **not a real gap** (detailed in §4.3.3).
-- Full suite **255/255 Green** (104 SRA deterministic + 5 invariant + 146 existing); 5 invariants (share conservation / binding uniqueness / governance consistency / A2 freeze snapshot / A3 all-zero burn); `.gas-snapshot` gas baseline committed (E1).
+- Full suite **253/253 Green** (104 SRA deterministic + 5 invariant + 144 existing); 5 invariants (share conservation / binding uniqueness / governance consistency / A2 freeze snapshot / A3 all-zero burn); `.gas-snapshot` gas baseline committed (E1).
 
 ### 5.12 Pre-Launch Prerequisite Checklist
 

@@ -11,7 +11,7 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
-import {FPV, Pair} from "../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor, FPV, Pair} from "../src/ServiceRewardsActor.sol";
 
 contract SRARegistryTest is SRATestBase {
     // ------------------------------------------------------------------------
@@ -142,6 +142,37 @@ contract SRARegistryTest is SRATestBase {
         vm.prank(orch);
         vm.expectRevert();
         sra.registerPairs(pairs);
+    }
+
+    /// C1: registerPairs with more than MAX_PAIRS (64) pairs reverts TooManyPairs (array-length bound, audit C1).
+    function test_RegisterPairs_TooManyPairs_Reverts() public {
+        address orch = makeAddr("orch");
+        _admit(orch);
+
+        Pair[] memory pairs = new Pair[](65);
+        for (uint256 i = 0; i < pairs.length; i++) {
+            pairs[i] =
+                _pair(makeAddr(string.concat("payer", vm.toString(i))), makeAddr(string.concat("op", vm.toString(i))));
+        }
+
+        vm.prank(orch);
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.TooManyPairs.selector));
+        sra.registerPairs(pairs);
+    }
+
+    /// C1 control: exactly MAX_PAIRS (64) pairs is accepted (boundary value).
+    function test_RegisterPairs_MaxPairs_Accepted() public {
+        address orch = makeAddr("orch");
+        _admit(orch);
+
+        Pair[] memory pairs = new Pair[](64);
+        for (uint256 i = 0; i < pairs.length; i++) {
+            pairs[i] =
+                _pair(makeAddr(string.concat("payer", vm.toString(i))), makeAddr(string.concat("op", vm.toString(i))));
+        }
+
+        _registerPairsAs(orch, pairs);
+        assertEq(sra.bindingOf(makeAddr("payer0"), makeAddr("op0")), orch);
     }
 
     /// Strategy 3: Remove releases all bindings; pairs return to unclaimed and can be claimed by other orchestrators.
