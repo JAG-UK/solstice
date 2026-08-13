@@ -12,6 +12,7 @@ import {ComputeSharesHarness} from "./ComputeSharesHarness.sol";
 ///      Value-domain constraint: usd is a USD-face-value aggregation (business magnitude ≤ ~1e6); assume ≤ 1e3
 ///      guarantees usd * SHARE_TOTAL(1e18) ≤ 1e21 ≪ 2^256 without overflow, focusing on property verification.
 contract ComputeSharesCheck is ComputeSharesHarness, Test {
+    // forge-lint: disable-start(mixed-case-function) — halmos runs only check_-prefixed property functions (tool convention)
     /// @dev SHARE_TOTAL aligned with the implementation's constant (1e18).
     uint256 private constant SHARE_TOTAL = 1e18;
     /// @dev Symbolic value-domain upper bound: shares depend only on usd **ratios** (floor + remainder top-up),
@@ -21,7 +22,7 @@ contract ComputeSharesCheck is ComputeSharesHarness, Test {
     uint256 private constant MAX_USD = 1e3;
 
     /// @dev P1: a single element's share is always == SHARE_TOTAL (n == 1 -> everything to the only participant).
-    function check_Conservation_Single(uint256 usd) public {
+    function check_Conservation_Single(uint256 usd) public pure {
         vm.assume(usd > 0 && usd <= MAX_USD);
         address[] memory wallets = new address[](1);
         uint256[] memory usds = new uint256[](1);
@@ -32,7 +33,7 @@ contract ComputeSharesCheck is ComputeSharesHarness, Test {
     }
 
     /// @dev P2: for any two participants' usd values, the share sum conserves exactly == SHARE_TOTAL.
-    function check_Conservation_N2(uint256 a, uint256 b) public {
+    function check_Conservation_N2(uint256 a, uint256 b) public pure {
         vm.assume(a > 0 && b > 0 && a + b <= MAX_USD);
         address[] memory wallets = new address[](2);
         uint256[] memory usds = new uint256[](2);
@@ -49,7 +50,7 @@ contract ComputeSharesCheck is ComputeSharesHarness, Test {
     }
 
     /// @dev P3: for any three participants' usd values, the share sum conserves exactly == SHARE_TOTAL.
-    function check_Conservation_N3(uint256 a, uint256 b, uint256 c) public {
+    function check_Conservation_N3(uint256 a, uint256 b, uint256 c) public pure {
         vm.assume(a > 0 && b > 0 && c > 0 && a + b + c <= MAX_USD);
         address[] memory wallets = new address[](3);
         uint256[] memory usds = new uint256[](3);
@@ -68,7 +69,7 @@ contract ComputeSharesCheck is ComputeSharesHarness, Test {
     }
 
     /// @dev P4 (weak monotonicity): a participant with larger usd gets a share no worse than one with smaller usd (two-participant comparison).
-    function check_Monotonic_N2(uint256 a, uint256 b) public {
+    function check_Monotonic_N2(uint256 a, uint256 b) public pure {
         vm.assume(a >= b && b > 0 && a + b <= MAX_USD);
         address[] memory wallets = new address[](2);
         uint256[] memory usds = new uint256[](2);
@@ -82,7 +83,7 @@ contract ComputeSharesCheck is ComputeSharesHarness, Test {
 
     /// @dev P5 (floor bound): each share is either floor(usd_i * T / total) or floor + 1
     ///      (the largest-remainder method only adjusts ideal quotas by ±1, never more).
-    function check_FloorBound_N2(uint256 a, uint256 b) public {
+    function check_FloorBound_N2(uint256 a, uint256 b) public pure {
         vm.assume(a > 0 && b > 0 && a + b <= MAX_USD);
         address[] memory wallets = new address[](2);
         uint256[] memory usds = new uint256[](2);
@@ -99,9 +100,10 @@ contract ComputeSharesCheck is ComputeSharesHarness, Test {
 
     /// @dev P6 (no overflow): usd * SHARE_TOTAL does not overflow within the business domain (≤ MAX_USD)
     ///      — 0.8.x checked arithmetic reverts on any overflow (verified by symbolic execution).
-    function check_NoOverflow_Boundary(uint256 usd) public {
+    function check_NoOverflow_Boundary(uint256 usd) public pure {
         vm.assume(usd > 0 && usd <= MAX_USD);
         uint256 mul = usd * SHARE_TOTAL;
         assert(mul > 0); // overflow would revert; reaching here proves no overflow
     }
+    // forge-lint: disable-end(mixed-case-function)
 }

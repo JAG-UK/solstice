@@ -49,8 +49,10 @@ struct PricePeriod {
     uint256 attoFil; // FIL amount settled in this period
 }
 
+// forge-lint: disable-next-item(pascal-case-struct) — FPV is the FIP-0118 spec term (public ABI-facing type)
 /// @notice Quarterly FPV: stablecoin face value + FIL pricing-period vector; usdValue is the final value after finalizeConversion.
 struct FPV {
+    // forge-lint: disable-next-line(mixed-case-variable) — spec field name (StableUSD, FIP-0118)
     uint256 stableUSD; // stablecoin component (face USD)
     PricePeriod[] filPeriods; // FIL component, <= MAX_PRICE_PERIODS entries
     uint256 usdValue; // USD final value after FinalizeConversion (0 if unconverted)
@@ -628,6 +630,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // 2.3.5 Read-only (for SWA and external audit)
     // ------------------------------------------------------------------------
 
+    // forge-lint: disable-next-item(mixed-case-function) — FIP-0118 spec method name (selector-affecting)
     /// @notice Returns the post-binding USD aggregate (stablecoin face value + finalized FIL component); reading auto-triggers idempotent finalize.
     /// @dev Aligned with the spec's "reading AggregatedFPV triggers FinalizeConversion" (📄 §3.2/§4.1/§4.2): after binding,
     ///      a read before finalize triggers the conversion (idempotent, same path as submitShares), returning the complete USD
@@ -830,6 +833,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     }
 
     function _pairId(address payer, address operator) internal pure returns (bytes32) {
+        // forge-lint: disable-next-line(asm-keccak256) — abi.encode deliberately: simpler & safer than hand-written assembly; gas impact negligible
         return keccak256(abi.encode(payer, operator));
     }
 

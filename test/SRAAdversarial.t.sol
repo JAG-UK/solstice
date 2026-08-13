@@ -23,8 +23,7 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
-import {ServiceRewardsActor, FPV, PricePeriod, Pair} from "../src/ServiceRewardsActor.sol";
-import {UnanimousGovernance} from "../src/lib/UnanimousGovernance.sol";
+import {ServiceRewardsActor, PricePeriod, Pair} from "../src/ServiceRewardsActor.sol";
 import {IsASafe} from "../src/lib/IsASafe.sol";
 import {SRATestBase} from "./SRATestBase.sol";
 

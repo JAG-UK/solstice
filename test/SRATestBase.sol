@@ -23,7 +23,7 @@ import {MockRewardTest} from "./mocks/MockRewardTest.sol";
 import {WAD} from "./mocks/FVMRewardActor.sol";
 
 import {ServiceRewardsActor, FPV, PricePeriod, Pair} from "../src/ServiceRewardsActor.sol";
-import {Share, WeightRecord, DistributionKind} from "../src/lib/FVMRewardTypes.sol";
+import {Share, WeightRecord} from "../src/lib/FVMRewardTypes.sol";
 import {FVMRewards} from "../src/lib/FVMRewards.sol";
 import {SWA_TIMELOCK} from "../src/lib/FVMRewardMethod.sol";
 

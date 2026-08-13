@@ -23,6 +23,7 @@ import {QuarterWindowHarness} from "./QuarterWindowHarness.sol";
 ///      both directions, invariant A2 random freeze-history exclusion — 100% line coverage guarantees no
 ///      unexecuted paths.
 contract QuarterWindowCheck is QuarterWindowHarness, Test {
+    // forge-lint: disable-start(mixed-case-function) — halmos runs only check_-prefixed property functions (tool convention)
     /// @dev owner params arbitrary (halmos executes with --no-test-constructor, skipping the constructor; the compiler layer still needs explicit args).
     constructor() QuarterWindowHarness(address(0xCAFE), address(0xBEEF)) {}
 
@@ -55,7 +56,7 @@ contract QuarterWindowCheck is QuarterWindowHarness, Test {
     ///      I.e. quarter progression is equidistant (the gap is always EPOCHS_PER_QUARTER, independent of
     ///      ACTIVATION/specific config), with no cross-quarter gaps or overlaps. The gap is derived from the
     ///      implementation itself (not depending on concrete parameter values that cannot be read).
-    function check_T3_QuarterProgression(uint64 q) public {
+    function check_T3_QuarterProgression(uint64 q) public view {
         vm.assume(q <= 3);
         uint256 gap = Epoch.unwrap(_qEnd(q + 1)) - Epoch.unwrap(_qEnd(q));
         uint256 gap0 = Epoch.unwrap(_qEnd(1)) - Epoch.unwrap(_qEnd(0));
@@ -91,9 +92,10 @@ contract QuarterWindowCheck is QuarterWindowHarness, Test {
 
     /// @dev T5b: no freeze history (freezeEpochs empty) -> never frozen at any epoch.
     ///      Verifies the empty-array boundary: _isFrozenAt returns false for empty history (zero iterations).
-    function check_T5b_IsFrozenAtEmpty(uint256 e) public {
+    function check_T5b_IsFrozenAtEmpty(uint256 e) public view {
         vm.assume(e < 1000);
         address orch = address(0xBEEF);
         assert(!_isFrozenAt(orch, Epoch.wrap(uint96(e))));
     }
+    // forge-lint: disable-end(mixed-case-function)
 }

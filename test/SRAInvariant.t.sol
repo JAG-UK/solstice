@@ -572,7 +572,7 @@ contract SRAInvariantTest is Test {
 
     /// I1 Share conservation: after any operation sequence, the share Σ written by the most recent successful submitShares is always == 1e18.
     /// Catches: wrong share top-up direction causing Σ≠1e18, freeze-exclusion omission, recipient omission, all-zero burn path breakage.
-    function invariant_SumShares_IsShareTotal() public {
+    function invariant_SumShares_IsShareTotal() public view {
         if (!handler.everSubmitted()) return; // never successfully submitted; no shares to query
         Share[] memory shares = handler.getServiceShares();
         if (shares.length == 0) return;
@@ -638,7 +638,7 @@ contract SRAInvariantTest is Test {
     /// appear in the share map (S5 strict snapshot: in-window unfreeze/freeze changes do not affect the quarter).
     /// Catches: freeze-exclusion omission (_frozenAtPostEnd determination error, freeze-interval pairing misalignment),
     ///        frozen identity not transferring with the struct after replace (A2 is the only machine verification covering this semantics).
-    function invariant_FrozenAtPostEnd_ExcludedFromShares() public {
+    function invariant_FrozenAtPostEnd_ExcludedFromShares() public view {
         if (!handler.hasLastSubmit()) return;
         Share[] memory shares = handler.getServiceShares();
         uint256 n = handler.lastFrozenCount();
@@ -659,7 +659,7 @@ contract SRAInvariantTest is Test {
     /// submitShares traversal — covering the boundary semantics that usdValue keeps the finalized value after correctVolume/postVolume writes.
     /// Catches: the D1 burn branch missing/wrong (not burned at total==0, or burned to the wrong address),
     ///        usdValue aggregation omission (an poster miscounted causing a false total-zero determination), freeze-exclusion count misalignment.
-    function invariant_ZeroTotal_BurnsToBurnAddress() public {
+    function invariant_ZeroTotal_BurnsToBurnAddress() public view {
         if (!handler.hasLastSubmit()) return;
         Share[] memory shares = handler.getServiceShares();
         (uint256 total, uint256 count) = handler.lastTotals();

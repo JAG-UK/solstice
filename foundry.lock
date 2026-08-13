@@ -6,7 +6,10 @@
     }
   },
   "lib/fvm-solidity": {
-    "rev": "ea1fe65367d7539236be111916a6e2781bcf7a1b"
+    "branch": {
+      "name": "main",
+      "rev": "ea1fe65367d7539236be111916a6e2781bcf7a1b"
+    }
   },
   "lib/safe-smart-account": {
     "tag": {

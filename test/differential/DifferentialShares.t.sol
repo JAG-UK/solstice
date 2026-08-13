@@ -45,7 +45,7 @@ contract DifferentialSharesTest is SRATestBase {
     // 1. Largest-remainder share allocation: on-chain _computeShares output == Python reference model expectation
     // ------------------------------------------------------------------------
 
-    function test_Diff_Share_MaxRemainder_AllCases() public {
+    function test_Diff_Share_MaxRemainder_AllCases() public view {
         DifferentialCases.ShareCase[] memory cases = DifferentialCases.shareCases();
         for (uint256 i = 0; i < cases.length; i++) {
             uint256[] memory usds = cases[i].usds;
