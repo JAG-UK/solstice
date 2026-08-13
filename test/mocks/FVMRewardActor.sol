@@ -150,6 +150,11 @@ contract FVMRewardActor {
     /// initializer would never apply); mockInit() sets it after etching.
     uint64 public swaTimelockEpochs;
 
+    /// @notice Test helper flag: when set, SetShares returns USR_FORBIDDEN unconditionally.
+    /// @dev A1 failure-injection switch - triggers the SetSharesFailed revert on the SRA
+    ///      submitShares path. Etched storage starts zeroed, default false, other tests unaffected.
+    bool public failSetShares;
+
     /// @notice Cumulative FIL minted through f02, all streams (T = position 9 / FilMined).
     uint256 public totalMintedReward;
     /// @notice Cumulative burn: w0 residual plus period-fold rounding dust (B).
@@ -199,6 +204,11 @@ contract FVMRewardActor {
 
     function mockSwaTimelockEpochs(uint64 epochs) external {
         swaTimelockEpochs = epochs;
+    }
+
+    /// @notice Test helper: flip the SetShares failure-injection flag (A1).
+    function mockFailSetShares(bool fail) external {
+        failSetShares = fail;
     }
 
     /// @notice Test helper: simulates AwardBlockReward, splitting `br` by clamped weight into a
@@ -336,6 +346,9 @@ contract FVMRewardActor {
     // -------------------------------------------------------------------------
 
     function _setShares(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
+        // A1 failure injection: when the flag is set, reject unconditionally (USR_FORBIDDEN),
+        // exercising the SRA's SetSharesFailed error handling.
+        if (failSetShares) return (USR_FORBIDDEN, 0, "");
         // Params CBOR: [id, [[walletBytes, share]...]]
         (uint64 id, Share[] memory newShares) = _decodeSetSharesParams(params);
         Stream storage s = _streams[id];

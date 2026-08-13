@@ -1,0 +1,220 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+pragma solidity ^0.8.36;
+
+// ============================================================================
+// SRA test common base (test-first contract anchor)
+//
+// This file is the SRA contract interface contract derived by the tester from design doc
+// docs/sra-design.md §2.3/§2.4. ServiceRewardsActor.sol was not yet implemented (Red phase);
+// the coder's implementation must match exactly the signatures, types, and constructor
+// parameters referenced in this file.
+//
+// ⚠️ Test assumptions (points not fully determined in the design; must be aligned by
+// coder/designer, see docs/sra-design.md §4.5):
+//   H-ctor : the constructor signature (10 params) is a test design derivation (✏️)
+//   H-fpv  : the FPV calldata uses the full 4-field structure; usdValue=0 / posted=false on posting
+//   H-band : PRICE_BAND in basis points (2000 = allows ±20% deviation)
+//   H-f099 : f099 is represented by fvm-solidity's BURN_ADDRESS (0xff...63)
+// ============================================================================
+
+import {SafeProxy} from "@safe/proxies/SafeProxy.sol";
+
+import {MockRewardTest} from "./mocks/MockRewardTest.sol";
+import {WAD} from "./mocks/FVMRewardActor.sol";
+
+import {ServiceRewardsActor, FPV, PricePeriod, Pair} from "../src/ServiceRewardsActor.sol";
+import {Share, WeightRecord, DistributionKind} from "../src/lib/FVMRewardTypes.sol";
+import {FVMRewards} from "../src/lib/FVMRewards.sol";
+import {SWA_TIMELOCK} from "../src/lib/FVMRewardMethod.sol";
+
+/// @notice Common test base: deploys the SRA, builds Safe owners, registers service stream 2, quarterly time utilities.
+/// @dev ⚠️ Conflict record: the design's §2.3.1 registerPairs signature `(address payer, address operator)[]`
+/// inline tuple arrays are illegal in Solidity 0.8.36 ("Expected type name") — this test uses ServiceRewardsActor's
+/// named struct `Pair` instead (field names payer/operator match the design; ABI encoding is still a tuple array).
+/// The coder should implement SRA with `registerPairs(Pair[] calldata pairs)` or an equivalent named struct.
+contract SRATestBase is MockRewardTest {
+    ServiceRewardsActor internal sra;
+    address internal owner1;
+    address internal owner2;
+
+    // ---- small test window constants (constructor config) ----
+    // quarter 1000 epochs, posting 300, verification 400, hold 100; ACTIVATION = 100000
+    // keeps quarter 0's windows far from the "SWA_TIMELOCK(20160) advance required to register stream 2".
+    // POST_PERIOD(300) > 2×SRA_CANCEL_HOLD(200): guarantees two consecutive freezes within the posting
+    // period (each 2 votes + 100 hold) complete before E+POST (the timing prerequisite for all-frozen -> burn).
+    uint64 internal constant EPOCHS_PER_QUARTER = 1000;
+    uint64 internal constant POST_PERIOD = 300;
+    uint64 internal constant VERIFICATION_WINDOW = 400;
+    uint64 internal constant SRA_CANCEL_HOLD = 100;
+    uint64 internal constant ACTIVATION_EPOCH = 100_000;
+    uint256 internal constant MIN_LOT = 100; // 100 USD (lot face value; the spec §11 proposes "a few hundred USD"; a small test value keeps all existing prints qualifying)
+    uint256 internal constant PRICE_BAND = 2000; // 20% (basis points), test threshold
+    uint256 internal constant MAX_PRICE_PERIODS = 32;
+
+    // f02's service stream fixed id = 2 (f02-design: "Migration pins consensus = 1 and service = 2")
+    uint64 internal constant SERVICE_STREAM_ID = 2;
+
+    function setUp() public virtual override {
+        super.setUp();
+        owner1 = _makeSafeOwner("sra-owner1");
+        owner2 = _makeSafeOwner("sra-owner2");
+        sra = new ServiceRewardsActor(
+            owner1,
+            owner2,
+            EPOCHS_PER_QUARTER,
+            POST_PERIOD,
+            VERIFICATION_WINDOW,
+            SRA_CANCEL_HOLD,
+            ACTIVATION_EPOCH,
+            MIN_LOT,
+            PRICE_BAND,
+            MAX_PRICE_PERIODS
+        );
+        _registerServiceStream();
+    }
+
+    /// @dev Builds a Safe proxy address (following the SWA test technique: masterCopy + SafeProxy + vm.etch + slot0).
+    function _makeSafeOwner(string memory label) internal returns (address proxyAddr) {
+        address masterCopy = makeAddr(string.concat(label, "-mastercopy"));
+        vm.etch(masterCopy, new bytes(8001));
+
+        SafeProxy real = new SafeProxy(masterCopy);
+        bytes memory code = address(real).code;
+
+        proxyAddr = makeAddr(label);
+        vm.etch(proxyAddr, code);
+        vm.store(proxyAddr, bytes32(0), bytes32(uint256(uint160(masterCopy))));
+    }
+
+    /// @dev migration pins service stream = 2, already registered with writer = SRA:
+    /// the base contract temporarily acts as the swa, registers EXPLICIT stream 2 (writer = address(sra)),
+    /// advances past SWA_TIMELOCK and uses one mock dispatch to trigger _settle so the stream takes effect.
+    function _registerServiceStream() internal {
+        rewardActor().mockSwa(address(this));
+
+        Share[] memory initialShares = new Share[](1);
+        initialShares[0] = Share({wallet: address(sra), share: 1e18});
+        int256 exitCode = FVMRewards.tryRegisterStream(
+            SERVICE_STREAM_ID,
+            WeightRecord({vStart: 0, slope: 0, tStart: 0, floor: 0, cap: WAD}),
+            address(sra),
+            initialShares,
+            uint64(block.number) + SWA_TIMELOCK
+        );
+        require(exitCode == 0, "registerServiceStream failed");
+
+        vm.roll(block.number + SWA_TIMELOCK);
+        // trigger one dispatch: the mock's handle_filecoin_method entry runs _settle() first, applying the due registration.
+        rewardActor().mockAwardBlockReward(0);
+    }
+
+    // ------------------------------------------------------------------------
+    // Quarterly time utilities (Epoch = block.number, controlled by vm.roll)
+    // ------------------------------------------------------------------------
+
+    function _qEnd(uint64 q) internal pure returns (uint64) {
+        return ACTIVATION_EPOCH + q * EPOCHS_PER_QUARTER;
+    }
+
+    /// @notice end epoch of the posting period: E + POST (posting window is (E, E+POST])
+    function _qPostEnd(uint64 q) internal pure returns (uint64) {
+        return _qEnd(q) + POST_PERIOD;
+    }
+
+    /// @notice end epoch of the verification window: E + POST + VERIFY (window is (E+POST, E+POST+VERIFY])
+    function _qVerifyEnd(uint64 q) internal pure returns (uint64) {
+        return _qPostEnd(q) + VERIFICATION_WINDOW;
+    }
+
+    function _rollTo(uint64 epoch) internal {
+        vm.roll(epoch);
+    }
+
+    // ------------------------------------------------------------------------
+    // Data construction utilities
+    // ------------------------------------------------------------------------
+
+    /// @notice pure-stablecoin FPV (no FIL periods).
+    function _fpv(uint256 stableUsd) internal pure returns (FPV memory) {
+        PricePeriod[] memory periods = new PricePeriod[](0);
+        return FPV({stableUSD: stableUsd, filPeriods: periods, usdValue: 0, posted: false});
+    }
+
+    /// @notice FPV with FIL pricing periods.
+    function _fpvWithPeriods(uint256 stableUsd, PricePeriod[] memory periods) internal pure returns (FPV memory) {
+        return FPV({stableUSD: stableUsd, filPeriods: periods, usdValue: 0, posted: false});
+    }
+
+    /// @notice a single FIL pricing period. Implied rate = lotUsd / claimFil (USD per FIL).
+    function _period(uint64 printEpoch, uint256 lotUsd, uint256 claimFil, uint256 attoFil)
+        internal
+        pure
+        returns (PricePeriod memory)
+    {
+        return PricePeriod({printEpoch: printEpoch, lotUsd: lotUsd, claimFil: claimFil, attoFil: attoFil});
+    }
+
+    function _pair(address payer, address operator) internal pure returns (Pair memory) {
+        return Pair({payer: payer, operator: operator});
+    }
+
+    // ------------------------------------------------------------------------
+    // Governance operation helpers: two votes (unanimous + hold) -> roll past hold -> permissionless completion
+    // ------------------------------------------------------------------------
+
+    function _admit(address orch) internal {
+        vm.prank(owner1);
+        sra.admit(orch);
+        vm.prank(owner2);
+        sra.admit(orch);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        sra.admit(orch); // third call (permissionless) completes execution
+    }
+
+    function _freeze(address orch) internal {
+        vm.prank(owner1);
+        sra.freeze(orch);
+        vm.prank(owner2);
+        sra.freeze(orch);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        sra.freeze(orch);
+    }
+
+    function _unfreeze(address orch) internal {
+        vm.prank(owner1);
+        sra.unfreeze(orch);
+        vm.prank(owner2);
+        sra.unfreeze(orch);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        sra.unfreeze(orch);
+    }
+
+    function _remove(address orch) internal {
+        vm.prank(owner1);
+        sra.remove(orch);
+        vm.prank(owner2);
+        sra.remove(orch);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        sra.remove(orch);
+    }
+
+    /// @notice correctVolume uses unanimousNoHold: the second vote executes, no roll needed.
+    function _correctVolume(address orch, uint64 q, FPV memory fpv) internal {
+        vm.prank(owner1);
+        sra.correctVolume(orch, q, fpv);
+        vm.prank(owner2);
+        sra.correctVolume(orch, q, fpv);
+    }
+
+    /// @notice posts an FPV as the orchestrator within quarter q's posting window.
+    function _postAs(address orch, uint64 q, FPV memory fpv) internal {
+        vm.prank(orch);
+        sra.postVolume(q, fpv);
+    }
+
+    /// @notice registers binding pairs as the orchestrator within quarter q's posting window.
+    function _registerPairsAs(address orch, Pair[] memory pairs) internal {
+        vm.prank(orch);
+        sra.registerPairs(pairs);
+    }
+}
