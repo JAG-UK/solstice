@@ -14,7 +14,9 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
-import {ServiceRewardsActor, FPV, PricePeriod} from "../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
+import {PricePeriod, FPV} from "../src/lib/SraTypes.sol";
+import {Epoch} from "../src/lib/Epoch.sol";
 
 contract SRAQuarterTest is SRATestBase {
     // ------------------------------------------------------------------------
@@ -643,7 +645,7 @@ contract SRAQuarterTest is SRATestBase {
         FPV memory f = sra.fpvOf(0, orch);
         assertEq(f.stableUSD, 200e18); // stablecoin component replaced
         assertEq(f.filPeriods.length, 2); // FIL periods copied wholesale
-        assertEq(f.filPeriods[0].printEpoch, 5000);
+        assertEq(Epoch.unwrap(f.filPeriods[0].printEpoch), 5000);
         assertEq(f.filPeriods[0].attoFil, 0.5e18);
         assertEq(f.filPeriods[1].attoFil, 0.25e18);
         assertEq(f.usdValue, 0); // cannot be finalized within the window; defensive reset

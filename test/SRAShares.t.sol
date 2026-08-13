@@ -10,7 +10,7 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
-import {PricePeriod} from "../src/ServiceRewardsActor.sol";
+import {PricePeriod} from "../src/lib/SraTypes.sol";
 import {FVMRewards} from "../src/lib/FVMRewards.sol";
 import {BURN_ADDRESS} from "fvm-solidity/FVMActors.sol";
 import {USR_FORBIDDEN} from "fvm-solidity/FVMErrors.sol";

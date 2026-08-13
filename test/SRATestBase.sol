@@ -22,7 +22,9 @@ import {SafeProxy} from "@safe/proxies/SafeProxy.sol";
 import {MockRewardTest} from "./mocks/MockRewardTest.sol";
 import {WAD} from "./mocks/FVMRewardActor.sol";
 
-import {ServiceRewardsActor, FPV, PricePeriod, Pair} from "../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
+import {Pair, PricePeriod, FPV} from "../src/lib/SraTypes.sol";
+import {Epoch} from "../src/lib/Epoch.sol";
 import {Share, WeightRecord} from "../src/lib/FVMRewardTypes.sol";
 import {FVMRewards} from "../src/lib/FVMRewards.sol";
 import {SWA_TIMELOCK} from "../src/lib/FVMRewardMethod.sol";
@@ -151,7 +153,7 @@ contract SRATestBase is MockRewardTest {
         pure
         returns (PricePeriod memory)
     {
-        return PricePeriod({printEpoch: printEpoch, lotUsd: lotUsd, claimFil: claimFil, attoFil: attoFil});
+        return PricePeriod({printEpoch: Epoch.wrap(printEpoch), lotUsd: lotUsd, claimFil: claimFil, attoFil: attoFil});
     }
 
     function _pair(address payer, address operator) internal pure returns (Pair memory) {

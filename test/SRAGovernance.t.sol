@@ -13,7 +13,8 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
-import {ServiceRewardsActor, FPV} from "../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
+import {FPV} from "../src/lib/SraTypes.sol";
 import {UnanimousGovernance} from "../src/lib/UnanimousGovernance.sol";
 import {IsASafe} from "../src/lib/IsASafe.sol";
 

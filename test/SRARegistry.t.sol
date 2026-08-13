@@ -11,7 +11,8 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
-import {ServiceRewardsActor, FPV, Pair} from "../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
+import {Pair, FPV} from "../src/lib/SraTypes.sol";
 
 contract SRARegistryTest is SRATestBase {
     // ------------------------------------------------------------------------

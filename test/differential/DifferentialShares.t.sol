@@ -17,7 +17,8 @@ pragma solidity ^0.8.36;
 // reference model; see test/differential/DifferentialCases.sol (AUTO-GENERATED, do not hand-edit).
 // ============================================================================
 
-import {ServiceRewardsActor, Share, PricePeriod} from "../../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor, Share} from "../../src/ServiceRewardsActor.sol";
+import {PricePeriod} from "../../src/lib/SraTypes.sol";
 import {SRATestBase} from "../SRATestBase.sol";
 import {DifferentialCases} from "./DifferentialCases.sol";
 import {DifferentialSharesHarness} from "./DifferentialSharesHarness.sol";

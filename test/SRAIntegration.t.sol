@@ -15,7 +15,7 @@ pragma solidity ^0.8.36;
 
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {Share} from "../src/lib/FVMRewardTypes.sol";
-import {PricePeriod} from "../src/ServiceRewardsActor.sol";
+import {PricePeriod} from "../src/lib/SraTypes.sol";
 import {SRATestBase} from "./SRATestBase.sol";
 
 contract SRAIntegrationTest is SRATestBase {

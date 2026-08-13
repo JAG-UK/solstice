@@ -29,7 +29,8 @@ pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
-import {ServiceRewardsActor, FPV, Pair} from "../src/ServiceRewardsActor.sol";
+import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
+import {Pair, FPV} from "../src/lib/SraTypes.sol";
 import {BURN_ADDRESS} from "fvm-solidity/FVMActors.sol";
 import {SRATestBase} from "./SRATestBase.sol";
 
