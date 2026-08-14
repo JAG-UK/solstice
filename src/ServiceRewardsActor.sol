@@ -90,12 +90,13 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
     // Epoch-typed immutables (review: EPOCHS_PER_QUARTER public — sole source of truth for both the SRA
     // and the SWA; SWA reads it via the auto-generated getter instead of duplicating quarter config).
+    // All quarter/window/hold values are Epoch-typed (epoch semantics -> Epoch type; POST_PERIOD,
+    // VERIFICATION_WINDOW, ACTIVATION_EPOCH follow SRA_CANCEL_HOLD/EPOCHS_PER_QUARTER — no wraps at call sites).
     Epoch public immutable EPOCHS_PER_QUARTER;
-    uint64 private immutable POST_PERIOD;
-    uint64 private immutable VERIFICATION_WINDOW;
-    // Epoch-typed hold (review: "if you define hold to be type Epoch then you won't have to wrap it everywhere else")
+    Epoch private immutable POST_PERIOD;
+    Epoch private immutable VERIFICATION_WINDOW;
     Epoch private immutable SRA_CANCEL_HOLD;
-    uint64 private immutable ACTIVATION_EPOCH;
+    Epoch private immutable ACTIVATION_EPOCH;
 
     // ------------------------------------------------------------------------
     // ERC-7201 storage accessors — layout (structs, slots, assembly getters) lives in
@@ -185,10 +186,10 @@ contract ServiceRewardsActor is UnanimousGovernance {
         require(epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0, InvalidParameter());
 
         EPOCHS_PER_QUARTER = Epoch.wrap(epochsPerQuarter);
-        POST_PERIOD = postPeriod;
-        VERIFICATION_WINDOW = verificationWindow;
+        POST_PERIOD = Epoch.wrap(postPeriod);
+        VERIFICATION_WINDOW = Epoch.wrap(verificationWindow);
         SRA_CANCEL_HOLD = Epoch.wrap(cancelHold);
-        ACTIVATION_EPOCH = activationEpoch;
+        ACTIVATION_EPOCH = Epoch.wrap(activationEpoch);
 
         SraStorage.SraStorageParams storage p = _params();
         p.minLot = minLot;
@@ -209,7 +210,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         // window checks (enabling forged finalize/shares). The guard rejects end beyond the Epoch
         // width. At uint64 width, uint64.max × EPOCHS_PER_QUARTER ≥ 2^64 always overflows, so the
         // guard is the revert path for the MaxQuarter probes (see test/SRAAdversarial.t.sol).
-        uint256 end = uint256(ACTIVATION_EPOCH) + uint256(q) * uint256(Epoch.unwrap(EPOCHS_PER_QUARTER));
+        uint256 end = uint256(Epoch.unwrap(ACTIVATION_EPOCH)) + uint256(q) * uint256(Epoch.unwrap(EPOCHS_PER_QUARTER));
         require(end <= type(uint64).max, InvalidParameter());
         return Epoch.wrap(uint64(end));
     }
@@ -218,26 +219,26 @@ contract ServiceRewardsActor is UnanimousGovernance {
     function _inPostingWindow(uint64 q) internal view returns (bool) {
         Epoch nowE = currentEpoch();
         Epoch e = _qEnd(q);
-        return nowE > e && nowE <= e + Epoch.wrap(uint64(POST_PERIOD));
+        return nowE > e && nowE <= e + POST_PERIOD;
     }
 
     /// @dev verification window (E+POST, E+POST+VERIFY].
     function _inVerificationWindow(uint64 q) internal view returns (bool) {
         Epoch nowE = currentEpoch();
-        Epoch postEnd = _qEnd(q) + Epoch.wrap(uint64(POST_PERIOD));
-        return nowE > postEnd && nowE <= postEnd + Epoch.wrap(uint64(VERIFICATION_WINDOW));
+        Epoch postEnd = _qEnd(q) + POST_PERIOD;
+        return nowE > postEnd && nowE <= postEnd + VERIFICATION_WINDOW;
     }
 
     /// @dev post-binding: now > E+POST+VERIFY.
     function _afterBinding(uint64 q) internal view returns (bool) {
         Epoch nowE = currentEpoch();
-        Epoch verifyEnd = _qEnd(q) + Epoch.wrap(uint64(POST_PERIOD)) + Epoch.wrap(uint64(VERIFICATION_WINDOW));
+        Epoch verifyEnd = _qEnd(q) + POST_PERIOD + VERIFICATION_WINDOW;
         return nowE > verifyEnd;
     }
 
     /// @dev frozen determination at the E+POST instant (S5 snapshot semantics: derivable at any point, independent of call timing).
     function _frozenAtPostEnd(address orch, uint64 q) internal view returns (bool) {
-        return _isFrozenAt(orch, _qEnd(q) + Epoch.wrap(uint64(POST_PERIOD)));
+        return _isFrozenAt(orch, _qEnd(q) + POST_PERIOD);
     }
 
     /// @dev Determines whether the epoch falls inside any [freezeEpochs[i], unfreezeEpochs[i]) freeze interval.
