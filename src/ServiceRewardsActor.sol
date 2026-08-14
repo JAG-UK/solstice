@@ -728,11 +728,13 @@ contract ServiceRewardsActor is UnanimousGovernance {
     ///      sub-MIN_LOT prints do not participate in pricing (deviation B aligned: skipped, never become the reference, 📄 §3.3).
     function _checkPriceBand(PricePeriod calldata p) internal view {
         require(p.claimFil > 0, ZeroClaimFil());
-        if (p.lotUsd < _params().minLot) return; // B: sub-MIN_LOT does not participate in pricing (not validated)
+        // Review-⑤ pattern: single storage pointer — avoids hashing the params namespace twice.
+        SraStorage.SraStorageParams storage prm = _params();
+        if (p.lotUsd < prm.minLot) return; // B: sub-MIN_LOT does not participate in pricing (not validated)
         SraStorage.SraStorageQuarter storage qt = _quarter();
         if (!qt.hasBoundPrint) return; // cold start / auction drought: no previous print to deviate from -> accepted
 
-        uint256 priceBand = _params().priceBand;
+        uint256 priceBand = prm.priceBand;
         // newRate/lastRate = (p.lotUsd/p.claimFil) / (last.lotUsd/last.claimFil)
         //   = p.lotUsd * last.claimFil / (last.lotUsd * p.claimFil)
         // band constraint: |newRate/lastRate - 1| <= band/10000
