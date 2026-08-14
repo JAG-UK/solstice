@@ -20,11 +20,6 @@ remappings = [
 
 [lint]
 severity = ["high", "med", "low", "info", "gas", "code-size"]
-# CI runs `forge lint --deny notes`. The FPV input-field naming notes (pascal-case-struct /
-# mixed-case-variable / mixed-case-function / asm-keccak256) are NOT excluded here — they are
-# deliberately exempted *locally* at each occurrence via `forge-lint: disable-*` comments
-# (spec-term names `FPV`/`stableUSD`/`aggregatedFPV` from FIP-0118, halmos `check_`-prefixed
-# property functions, and the `_pairId` abi.encode choice), keeping the rules active everywhere else.
 exclude_lints = [
     "incorrect-shift",
     "mixed-case-function",

@@ -204,7 +204,7 @@ verification: E(Q) + POST_PERIOD < now
 post-binding: now > E(Q) + POST_PERIOD + VERIFICATION_WINDOW     // SubmitShares/FinalizeConversion callable
 ```
 
-- All comparisons use the `Epoch` (uint96) type; `currentEpoch()` reads `block.number` (📘 Epoch.sol)
+- All comparisons use the `Epoch` (uint64) type; `currentEpoch()` reads `block.number` (📘 Epoch.sol)
 - Boundary determination is an off-by-one hotspot; tests must cover E, E+POST, E+POST+VERIFY and ±1 (🔍 I5)
 - **SubmitShares/FinalizeConversion/AggregatedFPV are callable only after the window closes and read only bound values** (📄 §3.2)
 
@@ -335,7 +335,7 @@ submitShares(Q):
 
 #### S4 Window Determination (standard practice)
 
-- **Decision**: boundary expressions — posting `E < now ≤ E+POST`, verification `E+POST < now ≤ E+POST+VERIFY`, post-binding `now > E+POST+VERIFY`; all comparisons use the `Epoch` (uint96) type.
+- **Decision**: boundary expressions — posting `E < now ≤ E+POST`, verification `E+POST < now ≤ E+POST+VERIFY`, post-binding `now > E+POST+VERIFY`; all comparisons use the `Epoch` (uint64) type.
 - **Rationale**: off-by-one hotspot; unified Epoch type + explicit boundary expressions.
 - **Impact**: I5 boundary ±1 tests cover (E, E+POST, E+POST+VERIFY and ±1).
 
@@ -889,14 +889,14 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
   - **F2** `setAdmittedLists` validates `stablecoins.length <= MAX_ALLOWLIST(64) && filecoinPayContracts.length <= MAX_ALLOWLIST`;
   - **E2** the constructor validates the same pricing-parameter bounds as setPricingParams plus `epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0` — deployment misconfiguration fails fast instead of silently misbehaving.
 - **Share computation** (*historical magnitude note* — superseded as the primary argument by the entry-enforced input-domain bounds above; kept for its Halmos reference): `_computeShares`'s `usds[i] * SHARE_TOTAL` (×1e18) — usd aggregation at business magnitude ~1e6 (USD face value); 1e6 × 1e18 = 1e24 ≪ 2^256 ≈ 1.16e77; Halmos P6 `check_NoOverflow_Boundary` proves no overflow within the symbolic domain (012 report §C1).
-- **Window computation**: `_qEnd` uses `uint256(ACTIVATION_EPOCH) + uint256(q) * uint256(EPOCHS_PER_QUARTER)` as an intermediate guard (S1C, §2.5.1), then casts to Epoch(uint96).
+- **Window computation**: `_qEnd` uses `uint256(ACTIVATION_EPOCH) + uint256(q) * uint256(Epoch.unwrap(EPOCHS_PER_QUARTER))` as an intermediate guard (S1C, §2.5.1), then casts to Epoch(uint64).
 - **PRICE_BAND cross-multiplication**: `_checkPriceBand`'s `lhs = p.lotUsd * lastClaimFil * BASIS_POINTS` (domain ~1e18 × 1e18 × 1e4 = 1e40 < 2^256), and `priceBand ≤ BASIS_POINTS` is validated by `setPricingParams` (`InvalidParameter`).
-- **Epoch magnitude**: Epoch is uint96 (2^96 ≈ 7.9e28 epochs, ~2.5e29 years) — quarter number Q × EPOCHS_PER_QUARTER at normal business scale is far below this (design S1C "quantization headroom 3×10⁸× universe age").
+- **Epoch magnitude**: Epoch is uint64 (2^64 ≈ 1.8e19 epochs, ~1.7e13 years) — quarter number Q × EPOCHS_PER_QUARTER at normal business scale is far below this, and the `_qEnd` range guard rejects anything beyond the width.
 
 **Residual risk/premises**:
 
-- `Epoch.sol`'s `add`/`sub` are implemented in assembly (no overflow check) — a design trade-off at the uint96 magnitude (unreachable in normal use).
-- Theoretical boundary: if a malicious huge `q` (uint64 max) is passed and the deployment config's EPOCHS_PER_QUARTER is also huge, the `_qEnd` cast to uint96 could truncate. But this only affects calls with **wrong quarter numbers** (FPV stored in `fpv[q][orch]`, window determination misaligned); it causes no fund loss and does not affect other quarters; and normal quarter numbers (~90 days each) reaching 2^64 quarters takes 5e19 years. **Listed as a theoretical boundary; no action needed**.
+- `Epoch.sol`'s `add`/`sub` are implemented in assembly (no overflow check) — a design trade-off at the uint64 magnitude, with the `_qEnd` range guard bounding inputs (unreachable in normal use).
+- Theoretical boundary: if a malicious huge `q` (uint64 max) is passed and the deployment config's EPOCHS_PER_QUARTER is also huge, the `_qEnd` cast to uint64 could truncate — but the range guard rejects `end > type(uint64).max` first (`InvalidParameter`), so this is closed. Normal quarter numbers (~90 days each) reaching 2^64 quarters takes 5e19 years. **Listed as a theoretical boundary; no action needed**.
 
 ### 5.6 Encoding and Boundaries (ABI input / CBOR output)
 

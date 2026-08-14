@@ -88,7 +88,9 @@ contract ServiceRewardsActor is UnanimousGovernance {
     uint256 private constant MAX_CLAIM_FIL = 1e30; // claim FIL per print — bounds the band-check products (V1); denominator in V2 (larger = safer)
     uint256 private constant MAX_ATTO_FIL = 1e27; // = 1e9 FIL per print — network supply is ~2e9 FIL (V2)
 
-    uint64 private immutable EPOCHS_PER_QUARTER;
+    // Epoch-typed immutables (review: EPOCHS_PER_QUARTER public — sole source of truth for both the SRA
+    // and the SWA; SWA reads it via the auto-generated getter instead of duplicating quarter config).
+    Epoch public immutable EPOCHS_PER_QUARTER;
     uint64 private immutable POST_PERIOD;
     uint64 private immutable VERIFICATION_WINDOW;
     // Epoch-typed hold (review: "if you define hold to be type Epoch then you won't have to wrap it everywhere else")
@@ -182,7 +184,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         require(maxPricePeriods > 0 && priceBand <= BASIS_POINTS && minLot <= MAX_LOT_USD, InvalidParameter());
         require(epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0, InvalidParameter());
 
-        EPOCHS_PER_QUARTER = epochsPerQuarter;
+        EPOCHS_PER_QUARTER = Epoch.wrap(epochsPerQuarter);
         POST_PERIOD = postPeriod;
         VERIFICATION_WINDOW = verificationWindow;
         SRA_CANCEL_HOLD = Epoch.wrap(cancelHold);
@@ -207,7 +209,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         // window checks (enabling forged finalize/shares). The guard rejects end beyond the Epoch
         // width. At uint64 width, uint64.max × EPOCHS_PER_QUARTER ≥ 2^64 always overflows, so the
         // guard is the revert path for the MaxQuarter probes (see test/SRAAdversarial.t.sol).
-        uint256 end = uint256(ACTIVATION_EPOCH) + uint256(q) * uint256(EPOCHS_PER_QUARTER);
+        uint256 end = uint256(ACTIVATION_EPOCH) + uint256(q) * uint256(Epoch.unwrap(EPOCHS_PER_QUARTER));
         require(end <= type(uint64).max, InvalidParameter());
         return Epoch.wrap(uint64(end));
     }
@@ -771,9 +773,14 @@ contract ServiceRewardsActor is UnanimousGovernance {
         return cur;
     }
 
-    function _pairId(address payer, address operator) internal pure returns (bytes32) {
-        // forge-lint: disable-next-line(asm-keccak256) — abi.encode deliberately: simpler & safer than hand-written assembly; gas impact negligible
-        return keccak256(abi.encode(payer, operator));
+    function _pairId(address payer, address operator) internal pure returns (bytes32 result) {
+        // Review: scratch-memory assembly — both addresses fit in the 64-byte scratch space,
+        // identical result to keccak256(abi.encode(payer, operator)) without the memory allocation.
+        assembly {
+            mstore(0, payer)
+            mstore(32, operator)
+            result := keccak256(0, 64)
+        }
     }
 
     function _swapRemove(address[] storage list, address orch) internal {
