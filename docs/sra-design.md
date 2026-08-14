@@ -746,6 +746,10 @@ forge test --match-contract SRAInvariant
 forge test --match-contract DifferentialShares
 
 # --- symbolic verification (halmos) ---
+# 不进 CI（决策，见 .github/workflows/test.yml 注释）：需独立 `forge build --ast` 一遍(~2min)
+# + SMT 求解 ~3min(ComputeSharesCheck ~125s + QuarterWindowCheck)，且与 via-IR 字节码瘦身
+# (EIP-170) 冲突——harness 继承主合约但不走构造器，via-IR 下 immutable 未赋值直接编译失败。
+# 仅在此类变更时手动跑：存储布局 / 数值计算 / 窗口边界逻辑改动，或每次发布前。
 # 前置: forge 1.7+ 默认不为 test 合约输出 AST, 而 halmos 从 out/ 读取 ast 字段 —— 先 `forge build --ast`
 # (若跳过此步, halmos 报 "KeyError: 'ast'"; 自 halmos 0.1.13 起 extra_output=["ast"] 已被 forge 移除, 改为 --ast flag)
 forge build --ast
@@ -1015,6 +1019,7 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
 - [ ] **Dual Safe addresses**: confirm real Safe proxies (constructor `isProbablyASafe` check); private keys held by distinct entities.
 - [ ] **service stream 2 registration**: f02-side stream 2's writer points to the SRA address (the mock simulates this flow; tests §4.4.3).
 - [ ] **replace chain length and freeze-history growth monitoring**: if governance frequency rises significantly, evaluate adding hard caps (§5.3 residual risk).
+- [ ] **EIP-170 bytecode size**: `forge build --sizes` — `ServiceRewardsActor` runtime ≤ 24,576 B. ⚠️ **Known issue (tracked)**: at HEAD the actor is 25,947 B (1,371 B over the limit) — the current monolith **cannot be deployed as-is**; `forge build --sizes` fails and CI does not (yet) check it. Verified remedy: `via_ir = true` compiles the actor to 21,111 B (3,465 B under the limit), but via-IR conflicts with the halmos/differential harnesses (Error 1284: immutables read but never assigned) — halmos must then run under a separate non-via-IR profile (`FOUNDRY_PROFILE=legacy`). Decision: **not fixing now** — the contract logic will be simplified later (logic-to-library / proxy split, #5), which resolves this naturally; **re-verify with `forge build --sizes` before launch** (details: `.ghost/references/017-sra-pr24-eip170-code-size-blocker.md`).
 
 ### 5.13 Threat Model Matrix (S4, adversarial-internal-party coverage)
 
