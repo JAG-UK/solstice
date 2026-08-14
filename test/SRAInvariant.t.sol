@@ -451,10 +451,11 @@ contract SRAInvariantHandler is SRATestBase {
         return _executedTasks[i];
     }
 
-    /// @dev Reads the PendingTask approved bitmask (PendingTask{modified:uint96, approvals:uint160} packed into one slot).
+    /// @dev Reads the PendingTask approved bitmask (PendingTask{modified:Epoch, approvals:uint160} packed into one slot;
+    ///      Epoch is uint64 post-8c3eff9, so approvals sits at bit offset 64).
     function approvalsOf(bytes32 taskId) external view returns (uint160) {
         bytes32 slot = keccak256(abi.encode(taskId, PENDING_TASKS_SLOT));
-        return uint160(uint256(vm.load(address(sra), slot)) >> 96);
+        return uint160(uint256(vm.load(address(sra), slot)) >> 64);
     }
 
     // ========================================================================

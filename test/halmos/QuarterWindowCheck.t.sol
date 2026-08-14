@@ -95,7 +95,7 @@ contract QuarterWindowCheck is QuarterWindowHarness, Test {
     function check_T5b_IsFrozenAtEmpty(uint256 e) public view {
         vm.assume(e < 1000);
         address orch = address(0xBEEF);
-        assert(!_isFrozenAt(orch, Epoch.wrap(uint96(e))));
+        assert(!_isFrozenAt(orch, Epoch.wrap(uint64(e))));
     }
     // forge-lint: disable-end(mixed-case-function)
 }

@@ -44,17 +44,17 @@ contract SRAAdversarial is SRATestBase {
         sra.postVolume(10, _fpv(100e18));
     }
 
-    /// q = uint64.max: with the default EPOCHS_PER_QUARTER(1000), uint64.max × 1000 still fits in the
-    /// current uint96 Epoch width, so the _qEnd range guard does NOT fire; the wrapped epoch is huge
-    /// and nowE < e -> NotInPostingWindow(q). (A dedicated guard test with a huge EPOCHS_PER_QUARTER
-    /// simulates the upstream uint64 narrowing — see test_FinalizeConversion_MaxQuarter_RangeGuard.)
-    function test_PostVolume_MaxQuarter_NotInPostingWindow() public {
+    /// q = uint64.max: with Epoch now uint64 (cherry-picked 8c3eff9), uint64.max × 1000 ≈ 2^83 > 2^64,
+    /// so the _qEnd range guard fires -> InvalidParameter (this is the guard becoming the rejection
+    /// path for MaxQuarter probes; the huge-EPOCHS_PER_QUARTER simulation below remains as an extra
+    /// direct guard test).
+    function test_PostVolume_MaxQuarter_RangeGuard_InvalidParameter() public {
         address orch = makeAddr("orch");
         _admit(orch);
 
         vm.roll(_qEnd(0) + 1);
         vm.prank(orch);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotInPostingWindow.selector, type(uint64).max));
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
         sra.postVolume(type(uint64).max, _fpv(100e18));
     }
 
@@ -72,8 +72,8 @@ contract SRAAdversarial is SRATestBase {
         sra.correctVolume(orch, 10, _fpv(100e18));
     }
 
-    /// q = uint64.max on correctVolume -> NotInVerificationWindow(q) (same reasoning as above: guard does not fire at uint96 width).
-    function test_CorrectVolume_MaxQuarter_NotInVerificationWindow() public {
+    /// q = uint64.max on correctVolume -> _qEnd range guard fires (uint64 width) -> InvalidParameter.
+    function test_CorrectVolume_MaxQuarter_RangeGuard_InvalidParameter() public {
         address orch = makeAddr("orch");
         _admit(orch);
 
@@ -81,7 +81,7 @@ contract SRAAdversarial is SRATestBase {
         vm.prank(owner1);
         sra.correctVolume(orch, type(uint64).max, _fpv(100e18));
         vm.prank(owner2);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotInVerificationWindow.selector, type(uint64).max));
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
         sra.correctVolume(orch, type(uint64).max, _fpv(100e18));
     }
 
@@ -92,27 +92,24 @@ contract SRAAdversarial is SRATestBase {
         sra.finalizeConversion(10);
     }
 
-    /// q = uint64.max on finalizeConversion -> NotBound(q) (guard does not fire at uint96 width).
-    function test_FinalizeConversion_MaxQuarter_NotBound() public {
+    /// q = uint64.max on finalizeConversion -> _qEnd range guard fires (uint64 width) -> InvalidParameter.
+    function test_FinalizeConversion_MaxQuarter_RangeGuard_InvalidParameter() public {
         vm.roll(_qVerifyEnd(0) + 1);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotBound.selector, type(uint64).max));
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
         sra.finalizeConversion(type(uint64).max);
     }
 
-    /// q = uint64.max on submitShares -> NotBound(q) (its own first-line require).
-    function test_SubmitShares_MaxQuarter_NotBound() public {
+    /// q = uint64.max on submitShares -> _afterBinding calls _qEnd, guard fires (uint64 width) -> InvalidParameter.
+    function test_SubmitShares_MaxQuarter_RangeGuard_InvalidParameter() public {
         vm.roll(_qVerifyEnd(0) + 1);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotBound.selector, type(uint64).max));
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
         sra.submitShares(type(uint64).max);
     }
 
-    /// The _qEnd range guard itself: with EPOCHS_PER_QUARTER = 2^40, uint64.max × 2^40 ≈ 2^104
-    /// exceeds the uint96 Epoch width -> end beyond type(uint96).max -> InvalidParameter.
-    /// This simulates the upstream Epoch narrowing (uint96 -> uint64): once Epoch is uint64,
-    /// even the default Q × 1000 overflows 2^64, so this guard (with its threshold bumped to
-    /// type(uint64).max) becomes the rejection path — the four MaxQuarter tests above then flip
-    /// from the window errors to InvalidParameter (see the sync note in ServiceRewardsActor._qEnd).
-    function test_FinalizeConversion_MaxQuarter_RangeGuard_InvalidParameter() public {
+    /// The _qEnd range guard itself, exercised directly: with EPOCHS_PER_QUARTER = 2^40,
+    /// uint64.max × 2^40 ≈ 2^104 > 2^64 -> end beyond type(uint64).max -> InvalidParameter
+    /// (same rejection path as the MaxQuarter probes above, but with a config-amplified q).
+    function test_FinalizeConversion_HugeQuarter_RangeGuard_InvalidParameter() public {
         // finalizeConversion needs no admitted orchestrator; only the window check runs.
         ServiceRewardsActor big = new ServiceRewardsActor(
             owner1,

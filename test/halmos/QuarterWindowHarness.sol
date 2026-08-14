@@ -59,7 +59,7 @@ contract QuarterWindowHarness is ServiceRewardsActor {
 
     /// @dev interval-search determination (e passed as uint256 for easier arithmetic in the check contract).
     function isFrozenAt(address orch, uint256 e) external view returns (bool) {
-        return _isFrozenAt(orch, Epoch.wrap(uint96(e)));
+        return _isFrozenAt(orch, Epoch.wrap(uint64(e)));
     }
 
     /// @dev test-precondition setup (internal; the check inherits and calls it inline — resolvable by halmos):
@@ -67,7 +67,7 @@ contract QuarterWindowHarness is ServiceRewardsActor {
     ///      determination logic under verification is still the implementation itself; this only sets test preconditions).
     function _setFreezeInterval(address orch, uint256 freeze, uint256 unfreeze) internal {
         _registry().orchestrators[orch].admitted = true;
-        _registry().orchestrators[orch].freezeEpochs.push(Epoch.wrap(uint96(freeze)));
-        _registry().orchestrators[orch].unfreezeEpochs.push(Epoch.wrap(uint96(unfreeze)));
+        _registry().orchestrators[orch].freezeEpochs.push(Epoch.wrap(uint64(freeze)));
+        _registry().orchestrators[orch].unfreezeEpochs.push(Epoch.wrap(uint64(unfreeze)));
     }
 }
