@@ -386,10 +386,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     /// @dev bindings store the admitted address; reads resolve along the alias chain to the current valid address (design-gap
     ///      completion: pairIds cannot be enumerated, so bindings do not migrate storage values; an alias indirection layer
     ///      achieves zero-enumeration transfer).
-    function replace(address oldOrch, address newOrch)
-        external
-        unanimous(keccak256(msg.data), SRA_CANCEL_HOLD)
-    {
+    function replace(address oldOrch, address newOrch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
         require(r.orchestrators[oldOrch].admitted, NotAdmitted(oldOrch));
         require(!r.orchestrators[newOrch].admitted, AlreadyAdmitted(newOrch));
@@ -576,9 +573,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
     /// @notice Returns the post-binding USD aggregate (stablecoin face value + finalized FIL component); reading auto-triggers idempotent finalize.
     /// @dev Aligned with the spec's "reading AggregatedFPV triggers FinalizeConversion" (📄 §3.2/§4.1/§4.2): after binding,
     ///      a read before finalize triggers the conversion (idempotent, same path as submitShares), returning the complete USD
-    ///      (incl. the FIL component), with the observable side effect isFinalized=true. Before binding it still returns 0.
+    ///      (incl. the FIL component), with the observable side effect isFinalized=true.
+    ///      Review: reverts NotBound(q) before binding — distinguishes "quarter not yet bound" (call too early; the SWA
+    ///      does not need to re-enforce the check) from "quarter with zero declared volume" (legitimately returns 0).
     function aggregatedFPV(uint64 q) external returns (uint256 usd) {
-        if (!_afterBinding(q)) return 0;
+        require(_afterBinding(q), NotBound(q));
         _finalizeConversion(q);
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.SraStorageQuarter storage qt = _quarter();
@@ -589,6 +588,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
             if (!fpv.posted) continue;
             usd += fpv.usdValue; // always complete after finalize (incl. the FIL component)
         }
+    }
+
+    /// @dev Quarter end epoch for quarter q (Epoch-typed; exposed per the IServiceRewardsActor interface the SWA consumes).
+    function qEnd(uint64 q) external view returns (Epoch) {
+        return _qEnd(q);
     }
 
     function isAdmitted(address orch) external view returns (bool) {

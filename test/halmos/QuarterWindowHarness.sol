@@ -32,10 +32,9 @@ contract QuarterWindowHarness is ServiceRewardsActor {
         )
     {}
 
-    /// @dev quarter end epoch (uint256 for easy arithmetic assertions in the check contract).
-    function qEnd(uint64 q) external view returns (uint256) {
-        return Epoch.unwrap(_qEnd(q));
-    }
+    // qEnd moved to ServiceRewardsActor (review): the actor now exposes
+    // `qEnd(uint64) external view returns (Epoch)` (IServiceRewardsActor interface);
+    // this harness inherits it, and the check contract reads `_qEnd` inline.
 
     /// @dev posting window (E, E+POST].
     function inPostingWindow(uint64 q) external view returns (bool) {

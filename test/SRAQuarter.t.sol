@@ -419,17 +419,19 @@ contract SRAQuarterTest is SRATestBase {
     // Strategy 11: AggregatedFPV (read-only bound value)
     // ------------------------------------------------------------------------
 
-    /// Strategy 11: aggregatedFPV returns 0 before the window closes (never reads unbound posted values).
-    function test_AggregatedFPV_BeforeBinding_Zero() public {
+    /// Strategy 11: aggregatedFPV reverts NotBound before the window closes (distinguishable from zero declared volume).
+    function test_AggregatedFPV_BeforeBinding_RevertsNotBound() public {
         address orch = makeAddr("orch");
         _admit(orch);
         vm.roll(_qEnd(0) + 1);
         _postAs(orch, 0, _fpv(100e18));
 
-        // 0 during posting/verification (not bound)
-        assertEq(sra.aggregatedFPV(0), 0);
+        // Revert NotBound during posting/verification (not bound) — the SWA can distinguish this from a zero-volume quarter
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotBound.selector, 0));
+        sra.aggregatedFPV(0);
         vm.roll(_qVerifyEnd(0));
-        assertEq(sra.aggregatedFPV(0), 0);
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotBound.selector, 0));
+        sra.aggregatedFPV(0);
     }
 
     /// Strategy 11: after binding aggregatedFPV = Σ each orchestrator's usdValue (read auto-triggers finalize, aligned with spec §3.2/§4.1/§4.2).
