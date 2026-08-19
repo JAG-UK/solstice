@@ -3,17 +3,16 @@ pragma solidity ^0.8.36;
 
 // ============================================================================
 // SRA share computation tests — covers design §3 strategies 1 (share rounding) / 3 (freeze-semantics snapshot) /
-//   4 (all-zero burn D1) / 10 (SetShares encoding) / 12 (f02 mock driving)
+//   4 (all-zero benign no-op, FIPs#1275 replacing D1 burn) / 10 (SetShares encoding) / 12 (f02 mock driving)
 //
 // Verification means: after submitShares, read the mock's getShares(2) (the f02 service stream's share map).
 // Mock validation: stream exists/EXPLICIT/writer permission/≤64 recipients/Σ==1e18 (see FVMRewardActor._setShares).
 // ============================================================================
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
-import {PricePeriod} from "../src/lib/SraTypes.sol";
 import {FVMRewards} from "../src/lib/FVMRewards.sol";
-import {BURN_ADDRESS} from "fvm-solidity/FVMActors.sol";
 import {USR_FORBIDDEN} from "fvm-solidity/FVMErrors.sol";
+import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {SRATestBase} from "./SRATestBase.sol";
 
 contract SRASharesTest is SRATestBase {
@@ -101,12 +100,12 @@ contract SRASharesTest is SRATestBase {
     }
 
     // ------------------------------------------------------------------------
-    // Strategy 4: all-zero burn (D1)
+    // Strategy 4: all-zero quarter is a benign no-op (FIP-0118 FIPs#1275, replacing D1 burn)
     // ------------------------------------------------------------------------
 
-    /// Strategy 4/D1: nobody posted (total=0) -> submitShares submits [{f099, 1e18}], the mock accepts.
-    /// ⚠️ This test also verifies the design's stated assumption: the mock accepts f099 (BURN_ADDRESS) as a valid recipient.
-    function test_SubmitShares_AllZero_BurnsToF099() public {
+    /// Strategy 4: nobody posted (total=0) -> submitShares is a benign no-op: no SetShares call,
+    /// the existing share map stands (FIP: "SplitRule is not evaluated and the existing share map stands").
+    function test_SubmitShares_AllZero_NoOp_KeepsMap() public {
         // two orchestrators admitted but nobody posted
         _admit(makeAddr("orchA"));
         _admit(makeAddr("orchB"));
@@ -114,14 +113,15 @@ contract SRASharesTest is SRATestBase {
         _rollTo(_qVerifyEnd(0) + 1);
         sra.submitShares(0);
 
+        // no SetShares happened: the stream map is still the registration-time initial map (writer = SRA)
         Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
         assertEq(shares.length, 1);
-        assertEq(shares[0].wallet, BURN_ADDRESS); // f099
+        assertEq(shares[0].wallet, address(sra)); // initial map unchanged
         assertEq(shares[0].share, 1e18);
     }
 
-    /// Strategy 4/D1 variant: all orchestrators excluded (posted but all frozen within the posting period) -> total=0 -> burn.
-    function test_SubmitShares_AllFrozen_BurnsToF099() public {
+    /// Strategy 4 variant: all orchestrators excluded (posted but all frozen within the posting period) -> total=0 -> no-op.
+    function test_SubmitShares_AllFrozen_NoOp_KeepsMap() public {
         address a = _admitAndPost(100e18);
         address b = _admitAndPost(200e18);
         _freeze(a);
@@ -132,7 +132,7 @@ contract SRASharesTest is SRATestBase {
 
         Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
         assertEq(shares.length, 1);
-        assertEq(shares[0].wallet, BURN_ADDRESS);
+        assertEq(shares[0].wallet, address(sra)); // initial map unchanged
         assertEq(shares[0].share, 1e18);
     }
 
@@ -235,29 +235,24 @@ contract SRASharesTest is SRATestBase {
         assertTrue(_hasWallet(shares, c));
     }
 
-    /// Strategy 10/12: submitShares auto-triggers finalizeConversion (FIL components converted into shares).
-    function test_SubmitShares_AutoFinalize_IncludesFilValue() public {
+    /// Strategy 10/12: submitShares with a post of USD value from the off-chain conversion (FIPs#1275).
+    function test_SubmitShares_PostedUsd_Proportional() public {
         address a = makeAddr("orchA");
         _admit(a);
-        // orchestrator a posts with a FIL period: 0.5e18 attoFIL × rate 1000 = 500e18 USD
+        // orchestrator a posts a single USD total (off-chain conversion folded the FIL contribution in)
         vm.roll(_qEnd(0) + 1);
-        PricePeriod[] memory periods = new PricePeriod[](1);
-        periods[0] = _period(5000, 1000, 1, 0.5e18);
         vm.prank(a);
-        sra.postVolume(0, _fpvWithPeriods(500e18, periods));
+        sra.postVolume(0, 1000e18); // = 500e18 stable + 500e18 converted FIL
 
-        // orchestrator b pure stablecoin 500e18 -> each gets 50%
+        // orchestrator b pure stablecoin 500e18 -> a:b = 2:1
         address b = _admitAndPost(500e18);
 
         _rollTo(_qVerifyEnd(0) + 1);
-        sra.submitShares(0); // no manual finalize; submitShares auto-triggers
+        sra.submitShares(0);
 
         Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
         assertEq(shares.length, 2);
-        // a: (500 + 500)e18 = 1000e18; b: 500e18; total 1500e18 -> a 2/3, b 1/3
-        // largest-remainder (design §2.5.3, remainder-descending top-up): after floor a=666...666, b=333...333, residue=1
-        // remainder a = (1e39 % 1.5e21) = 1e21 > remainder b = (5e38 % 1.5e21) = 5e20
-        // -> the larger-remainder a tops up +1: a=666...667, b=333...333 (T1 fix: the original assertion had the top-up direction opposite to the design)
+        // a: 1000e18; b: 500e18; total 1500e18 -> a 2/3, b 1/3
         assertEq(_walletShare(shares, a), 666_666_666_666_666_667);
         assertEq(_walletShare(shares, b), 333_333_333_333_333_333);
         assertEq(_sumShares(shares), 1e18);
@@ -355,6 +350,41 @@ contract SRASharesTest is SRATestBase {
         // quarter 1's share map is independent: A/B did not post in quarter 1 (usdValue=0 filtered) -> no residue
         assertEq(q1.length, 1);
         assertEq(q1[0].wallet, c);
+        assertEq(q1[0].share, 1e18);
+    }
+
+    // ------------------------------------------------------------------------
+    // FIP-0118 §4.2 latest-quarter constraint: an older quarter's shares can never overwrite a newer quarter's
+    // ------------------------------------------------------------------------
+
+    /// FIP-0118 §4.2: SubmitShares operates on the **latest** bound quarter. Q0 already submitted, Q1 bound
+    /// (latest) -> submitting Q0 must revert NotLatestQuarter (the map stands — no late overwrite of a newer
+    /// quarter's shares); submitting the latest bound quarter still succeeds.
+    function test_SubmitShares_NotLatestQuarter_Reverts() public {
+        // Q0: A posts 100e18, submit after Q0 binding
+        address a = _admitAndPost(100e18);
+        _rollTo(_qVerifyEnd(0) + 1);
+        sra.submitShares(0);
+        Share[] memory q0 = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(q0.length, 1);
+        assertEq(q0[0].wallet, a);
+
+        // Q1: B posts, bind Q1 (becomes the latest bound quarter)
+        address b = makeAddr("orchB-q1");
+        _admit(b);
+        vm.roll(_qEnd(1) + 1);
+        _postAs(b, 1, _fpv(200e18));
+        _rollTo(_qVerifyEnd(1) + 1);
+
+        // Q0 is superseded -> submitting it reverts NotLatestQuarter (never overwrites Q1's newer map)
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotLatestQuarter.selector, uint64(0)));
+        sra.submitShares(0);
+
+        // submitting the latest bound quarter (Q1) still succeeds
+        sra.submitShares(1);
+        Share[] memory q1 = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(q1.length, 1);
+        assertEq(q1[0].wallet, b);
         assertEq(q1[0].share, 1e18);
     }
 

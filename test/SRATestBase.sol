@@ -11,10 +11,9 @@ pragma solidity ^0.8.36;
 //
 // ⚠️ Test assumptions (points not fully determined in the design; must be aligned by
 // coder/designer, see docs/sra-design.md §4.5):
-//   H-ctor : the constructor signature (10 params) is a test design derivation (✏️)
-//   H-fpv  : the FPV calldata uses the full 4-field structure; usdValue=0 / posted=false on posting
-//   H-band : PRICE_BAND in basis points (2000 = allows ±20% deviation)
-//   H-f099 : f099 is represented by fvm-solidity's BURN_ADDRESS (0xff...63)
+//   H-ctor : the constructor signature (9 params) is a test design derivation (✏️)
+//   H-fpv  : FPV is a single USD total (FIP-0118 FIPs#1275: off-chain conversion)
+//   H-band : PRICE_BAND in basis points (2000 = allows ±20% deviation); authoritative for the off-chain indexer
 // ============================================================================
 
 import {SafeProxy} from "@safe/proxies/SafeProxy.sol";
@@ -23,8 +22,7 @@ import {MockRewardTest} from "./mocks/MockRewardTest.sol";
 import {WAD} from "./mocks/FVMRewardActor.sol";
 
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
-import {Pair, PricePeriod, FPV} from "../src/lib/SraTypes.sol";
-import {Epoch} from "../src/lib/Epoch.sol";
+import {Pair} from "../src/lib/SraTypes.sol";
 import {Share, WeightRecord} from "../src/lib/FVMRewardTypes.sol";
 import {FVMRewards} from "../src/lib/FVMRewards.sol";
 import {SWA_TIMELOCK} from "../src/lib/FVMRewardMethod.sol";
@@ -49,9 +47,8 @@ contract SRATestBase is MockRewardTest {
     uint64 internal constant VERIFICATION_WINDOW = 400;
     uint64 internal constant SRA_CANCEL_HOLD = 100;
     uint64 internal constant ACTIVATION_EPOCH = 100_000;
-    uint256 internal constant MIN_LOT = 100; // 100 USD (lot face value; the spec §11 proposes "a few hundred USD"; a small test value keeps all existing prints qualifying)
+    uint256 internal constant MIN_LOT = 100; // 100 USD (lot face value; authoritative for the off-chain indexer, FIPs#1275)
     uint256 internal constant PRICE_BAND = 2000; // 20% (basis points), test threshold
-    uint256 internal constant MAX_PRICE_PERIODS = 32;
 
     // f02's service stream fixed id = 2 (f02-design: "Migration pins consensus = 1 and service = 2")
     uint64 internal constant SERVICE_STREAM_ID = 2;
@@ -69,8 +66,7 @@ contract SRATestBase is MockRewardTest {
             SRA_CANCEL_HOLD,
             ACTIVATION_EPOCH,
             MIN_LOT,
-            PRICE_BAND,
-            MAX_PRICE_PERIODS
+            PRICE_BAND
         );
         _registerServiceStream();
     }
@@ -136,24 +132,9 @@ contract SRATestBase is MockRewardTest {
     // Data construction utilities
     // ------------------------------------------------------------------------
 
-    /// @notice pure-stablecoin FPV (no FIL periods).
-    function _fpv(uint256 stableUsd) internal pure returns (FPV memory) {
-        PricePeriod[] memory periods = new PricePeriod[](0);
-        return FPV({stableUSD: stableUsd, filPeriods: periods, usdValue: 0, posted: false});
-    }
-
-    /// @notice FPV with FIL pricing periods.
-    function _fpvWithPeriods(uint256 stableUsd, PricePeriod[] memory periods) internal pure returns (FPV memory) {
-        return FPV({stableUSD: stableUsd, filPeriods: periods, usdValue: 0, posted: false});
-    }
-
-    /// @notice a single FIL pricing period. Implied rate = lotUsd / claimFil (USD per FIL).
-    function _period(uint64 printEpoch, uint256 lotUsd, uint256 claimFil, uint256 attoFil)
-        internal
-        pure
-        returns (PricePeriod memory)
-    {
-        return PricePeriod({printEpoch: Epoch.wrap(printEpoch), lotUsd: lotUsd, claimFil: claimFil, attoFil: attoFil});
+    /// @notice single USD total for the quarter (FIP-0118 FIPs#1275: off-chain FIL→USD conversion).
+    function _fpv(uint256 usd) internal pure returns (uint256) {
+        return usd;
     }
 
     function _pair(address payer, address operator) internal pure returns (Pair memory) {
@@ -201,15 +182,15 @@ contract SRATestBase is MockRewardTest {
     }
 
     /// @notice correctVolume uses unanimousNoHold: the second vote executes, no roll needed.
-    function _correctVolume(address orch, uint64 q, FPV memory fpv) internal {
+    function _correctVolume(address orch, uint64 q, uint256 value) internal {
         vm.prank(owner1);
-        sra.correctVolume(orch, q, fpv);
+        sra.correctVolume(orch, q, value);
         vm.prank(owner2);
-        sra.correctVolume(orch, q, fpv);
+        sra.correctVolume(orch, q, value);
     }
 
-    /// @notice posts an FPV as the orchestrator within quarter q's posting window.
-    function _postAs(address orch, uint64 q, FPV memory fpv) internal {
+    /// @notice posts a single USD total as the orchestrator within quarter q's posting window.
+    function _postAs(address orch, uint64 q, uint256 fpv) internal {
         vm.prank(orch);
         sra.postVolume(q, fpv);
     }

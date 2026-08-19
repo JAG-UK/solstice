@@ -16,9 +16,10 @@ pragma solidity ^0.8.36;
 //
 // Handler design:
 //   - inherits SRATestBase (auto-deploys SRA + Safe owners + service stream 2)
-//   - 14 random operations (fuzzer targets): admit/remove/freeze/unfreeze/replace/
-//     reassignBinding/registerPairs/postVolume/correctVolume/finalizeConversion/
+//   - 13 random operations (fuzzer targets): admit/remove/freeze/unfreeze/replace/
+//     reassignBinding/registerPairs/postVolume/correctVolume/
 //     submitShares/parkAdmit/completeParked/rollForward
+//     (finalizeConversion removed by FIPs#1275)
 //   - time model: governance operations internally roll(block.number + SRA_CANCEL_HOLD) to complete the three phases;
 //     business operations explicitly roll to the target quarter window (posting/verification/post-bound)
 //   - every operation's precondition check keeps the "expected success" path reachable (invalid calls return directly, no state pollution)
@@ -30,8 +31,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
-import {Pair, FPV} from "../src/lib/SraTypes.sol";
-import {BURN_ADDRESS} from "fvm-solidity/FVMActors.sol";
+import {Pair} from "../src/lib/SraTypes.sol";
 import {SRATestBase} from "./SRATestBase.sol";
 
 /// @dev ERC-7201 storage slot of PendingTask (see src/lib/PendingTask.sol: Solstice.PendingTasks).
@@ -265,40 +265,31 @@ contract SRAInvariantHandler is SRATestBase {
         uint64 qq = uint64(bound(q, 0, MAX_Q));
         address orch = _pickOrch(orchIdx);
         if (!sra.isAdmitted(orch)) return;
-        // S3: bound(1, 1e30) aligns with the code-enforced MAX_STABLE_USD (correctVolume rejects > 1e30).
+        // S3: bound(1, 1e30) aligns with the code-enforced MAX_FPV_USD (correctVolume rejects > 1e30).
         uint256 stableUsd = bound(usd, 1, 1e30);
         vm.roll(_qPostEnd(qq) + 1 + uint64(bound(usd, 0, VERIFICATION_WINDOW - 1)));
-        FPV memory fpv = _fpv(stableUsd);
         vm.prank(owner1);
-        sra.correctVolume(orch, qq, fpv);
+        sra.correctVolume(orch, qq, stableUsd);
         vm.prank(owner2);
-        sra.correctVolume(orch, qq, fpv);
+        sra.correctVolume(orch, qq, stableUsd);
         _posted[qq][orch] = true;
     }
 
-    /// @notice Finalize conversion (permissionless, idempotent after bound).
-    function finalizeConversion(uint256 q) external {
-        uint64 qq = uint64(bound(q, 0, MAX_Q));
-        vm.roll(_qVerifyEnd(qq) + 1 + uint64(bound(q, 0, 50)));
-        sra.finalizeConversion(qq);
-    }
-
-    /// @notice Submit shares (permissionless, auto-triggers conversion).
+    /// @notice Submit shares (permissionless after binding; FIPs#1275: no on-chain finalize to trigger).
+    ///         Only a *successful* submit with non-zero total records the last-submit snapshot — a revert
+    ///         (e.g. AlreadySubmitted) or an all-zero no-op leaves the previous snapshot valid (the map did
+    ///         not change), otherwise A2/A3 would compare a new snapshot against the stale map.
     function submitShares(uint256 q) external {
         uint64 qq = uint64(bound(q, 0, MAX_Q));
         vm.roll(_qVerifyEnd(qq) + 1 + uint64(bound(q, 0, 50)));
-        // A3: trigger finalize first (idempotent with submitShares's internal _finalizeConversion),
-        // so fpv.usdValue is computed — the snapshot and submitShares traverse read the same data source.
-        // ⚠️ the fuzzer's vm.roll can rewind time, possibly constructing a pseudo-timeline where
-        // "correctVolume/postVolume write after finalize" (here the implementation's usdValue keeps the
-        // finalized value, not recomputed) — reading fpvOf directly makes the handler exactly match the
-        // implementation, avoiding the simulation bias of manual usdValue tracking.
-        sra.finalizeConversion(qq);
-        _snapshotPostEnd(qq); // A2/A3: POST-instant snapshot (frozen set + non-frozen usdValue aggregation)
-        sra.submitShares(qq);
-        _everSubmitted = true;
-        _hasLastSubmit = true;
-        _lastSubmitQ = qq;
+        try sra.submitShares(qq) {
+            _everSubmitted = true;
+            // _snapshotPostEnd records only for non-zero-total quarters (no-op quarters return false)
+            if (_snapshotPostEnd(qq)) {
+                _hasLastSubmit = true;
+                _lastSubmitQ = qq;
+            }
+        } catch {}
     }
 
     // ========================================================================
@@ -481,31 +472,42 @@ contract SRAInvariantHandler is SRATestBase {
         _executedTasks.push(taskId);
     }
 
-    /// @dev A2/A3: records the POST-instant snapshot of quarter qq — the set of active orchestrators frozen at the POST
-    ///      instant, and the Σ and count of non-frozen with usdValue>0 (consistent with the implementation's submitShares
-    ///      admittedList traversal exclusion semantics). Freeze determination uses the handler-recorded freeze intervals
-    ///      (not depending on the current block.number); usdValue reads the implementation's fpvOf directly (post-finalize),
-    ///      the same data source as the submitShares traversal.
-    function _snapshotPostEnd(uint64 qq) internal {
+    /// @dev A2/A3: records the POST-instant snapshot for a successfully submitted non-zero quarter — the set of
+    ///      active orchestrators frozen at the POST instant, and the Σ and count of non-frozen with usd > 0
+    ///      (consistent with the implementation's submitShares admittedList traversal exclusion semantics).
+    ///      Returns false for an all-zero quarter (benign no-op — the map did not change, so the previous
+    ///      snapshot stays valid; recording a new one would mismatch the unchanged map).
+    function _snapshotPostEnd(uint64 qq) internal returns (bool recorded) {
         uint64 postEnd = _qPostEnd(qq);
-        delete _lastFrozenWallets;
-        _lastTotal = 0;
-        _lastActiveCount = 0;
+        // first pass: if the total is 0 (all-zero no-op quarter), skip recording entirely
         for (uint256 i = 0; i < _orchPool.length; i++) {
             address orch = _orchPool[i];
             if (!sra.isAdmitted(orch)) continue;
-            bool frozenAtPost = _isFrozenAtHandled(orch, postEnd);
-            if (frozenAtPost) {
-                // the implementation excludes the orch itself (_frozenAtPostEnd continue, producing no wallet)
-                _lastFrozenWallets.push(orch);
-                continue;
-            }
-            uint256 usd = sra.fpvOf(qq, orch).usdValue; // post-finalize, reads the same field as submitShares
-            if (usd > 0) {
-                _lastTotal += usd;
-                _lastActiveCount++;
+            if (_isFrozenAtHandled(orch, postEnd)) continue;
+            if (sra.fpvOf(qq, orch).usd > 0) {
+                // non-zero total exists -> record the full snapshot
+                delete _lastFrozenWallets;
+                _lastTotal = 0;
+                _lastActiveCount = 0;
+                for (uint256 j = 0; j < _orchPool.length; j++) {
+                    address o = _orchPool[j];
+                    if (!sra.isAdmitted(o)) continue;
+                    bool frozenAtPost = _isFrozenAtHandled(o, postEnd);
+                    if (frozenAtPost) {
+                        // the implementation excludes the orch itself (_frozenAtPostEnd continue, producing no wallet)
+                        _lastFrozenWallets.push(o);
+                        continue;
+                    }
+                    uint256 usd = sra.fpvOf(qq, o).usd; // bound USD value — same field submitShares reads (FIPs#1275)
+                    if (usd > 0) {
+                        _lastTotal += usd;
+                        _lastActiveCount++;
+                    }
+                }
+                return true;
             }
         }
+        return false;
     }
 
     /// @dev Determines whether the epoch falls inside any [freezeAt[i], unfreezeAt[i]) freeze interval (same semantics as the implementation's _isFrozenAt).
@@ -554,7 +556,7 @@ contract SRAInvariantTest is Test {
         // explicitly limit the handler's operation function set — excluding setUp() (public; otherwise the fuzzer would
         // treat it as a target and randomly call it, resetting the sra instance and diverging the handler's expected state
         // from reality; also the root cause of non-contract mock errors)
-        bytes4[] memory selectors = new bytes4[](14);
+        bytes4[] memory selectors = new bytes4[](13);
         selectors[0] = SRAInvariantHandler.admit.selector;
         selectors[1] = SRAInvariantHandler.remove.selector;
         selectors[2] = SRAInvariantHandler.freeze.selector;
@@ -564,16 +566,15 @@ contract SRAInvariantTest is Test {
         selectors[6] = SRAInvariantHandler.registerPairs.selector;
         selectors[7] = SRAInvariantHandler.postVolume.selector;
         selectors[8] = SRAInvariantHandler.correctVolume.selector;
-        selectors[9] = SRAInvariantHandler.finalizeConversion.selector;
-        selectors[10] = SRAInvariantHandler.submitShares.selector;
-        selectors[11] = SRAInvariantHandler.parkAdmit.selector;
-        selectors[12] = SRAInvariantHandler.completeParked.selector;
-        selectors[13] = SRAInvariantHandler.rollForward.selector;
+        selectors[9] = SRAInvariantHandler.submitShares.selector;
+        selectors[10] = SRAInvariantHandler.parkAdmit.selector;
+        selectors[11] = SRAInvariantHandler.completeParked.selector;
+        selectors[12] = SRAInvariantHandler.rollForward.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
     /// I1 Share conservation: after any operation sequence, the share Σ written by the most recent successful submitShares is always == 1e18.
-    /// Catches: wrong share top-up direction causing Σ≠1e18, freeze-exclusion omission, recipient omission, all-zero burn path breakage.
+    /// Catches: wrong share top-up direction causing Σ≠1e18, freeze-exclusion omission, recipient omission, all-zero no-op path breakage.
     function invariant_SumShares_IsShareTotal() public view {
         if (!handler.everSubmitted()) return; // never successfully submitted; no shares to query
         Share[] memory shares = handler.getServiceShares();
@@ -654,24 +655,21 @@ contract SRAInvariantTest is Test {
         }
     }
 
-    /// A3 All-zero burn (D1): in the most recent submit quarter, if the Σ of non-frozen with usdValue>0 at the POST instant
-    /// is 0 -> the share map is a single BURN_ADDRESS record (share == SHARE_TOTAL); if Σ>0 -> the map is a non-empty subset
-    /// of the active orchestrators (zero-share entries trimmed), all entries non-zero, size <= active count.
-    /// usdValue reads the implementation's fpvOf directly (finalized before the snapshot), the same data source as the
-    /// submitShares traversal — covering the boundary semantics that usdValue keeps the finalized value after correctVolume/postVolume writes.
-    /// Catches: the D1 burn branch missing/wrong (not burned at total==0, or burned to the wrong address),
-    ///        usdValue aggregation omission (an poster miscounted causing a false total-zero determination), freeze-exclusion count misalignment.
-    function invariant_ZeroTotal_BurnsToBurnAddress() public view {
+    /// A3 All-zero no-op (FIP-0118 FIPs#1275, replacing D1 burn): in the most recent submit quarter,
+    /// if the Σ of non-frozen with usd>0 at the POST instant is 0 -> submitShares is a benign no-op:
+    /// SplitRule is not evaluated and the existing share map stands (covered by the SRAShares unit
+    /// tests; here the invariant only needs to assert the map stays valid for the Σ>0 branch).
+    /// If Σ>0 -> the map is a non-empty subset of the active orchestrators (zero-share entries trimmed),
+    /// all entries non-zero, size <= active count.
+    /// Catches: usd aggregation omission (a poster miscounted causing a false total-zero determination),
+    ///        freeze-exclusion count misalignment, trimmed-map corruption.
+    function invariant_NonZeroTotal_ValidShareMap() public view {
         if (!handler.hasLastSubmit()) return;
         Share[] memory shares = handler.getServiceShares();
         (uint256 total, uint256 count) = handler.lastTotals();
-        if (total == 0) {
-            assertEq(shares.length, 1, "A3: zero total must produce a single burn entry");
-            assertEq(shares[0].wallet, BURN_ADDRESS, "A3: burn entry wallet must be BURN_ADDRESS");
-            assertEq(shares[0].share, 1e18, "A3: burn entry share must be SHARE_TOTAL");
-        } else {
+        if (total > 0) {
             // The implementation trims zero-share entries (largest-remainder can floor a tiny
-            // usdValue to 0 when the residue top-up round count is smaller than the active count),
+            // usd to 0 when the residue top-up round count is smaller than the active count),
             // so the map holds a non-empty subset of the active orchestrators, all non-zero.
             assertGt(shares.length, 0, "A3: non-zero total must produce at least one share");
             assertLe(shares.length, count, "A3: share count must not exceed active orchestrator count");

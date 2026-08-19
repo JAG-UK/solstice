@@ -19,20 +19,10 @@ contract DifferentialSharesHarness is ServiceRewardsActor {
         uint64 cancelHold,
         uint64 activationEpoch,
         uint256 minLot,
-        uint256 priceBand,
-        uint256 maxPricePeriods
+        uint256 priceBand
     )
         ServiceRewardsActor(
-            o1,
-            o2,
-            epochsPerQuarter,
-            postPeriod,
-            verificationWindow,
-            cancelHold,
-            activationEpoch,
-            minLot,
-            priceBand,
-            maxPricePeriods
+            o1, o2, epochsPerQuarter, postPeriod, verificationWindow, cancelHold, activationEpoch, minLot, priceBand
         )
     {}
 

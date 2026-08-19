@@ -27,8 +27,7 @@ contract QuarterWindowHarness is ServiceRewardsActor {
             uint64(100), // cancelHold
             uint64(100_000), // activationEpoch
             1e18, // minLot
-            2000, // priceBand (20%, basis points)
-            32 // maxPricePeriods
+            2000 // priceBand (20%, basis points)
         )
     {}
 

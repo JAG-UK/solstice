@@ -3,45 +3,33 @@ pragma solidity ^0.8.36;
 
 // ============================================================================
 // SRA integration contract tests — simulate the SWA QuarterlyGateCheck consumption chain of aggregatedFPV
-// (spec-conformance alignment: deviation A eliminated; see .ghost/references/013-sra-spec-conformance.md)
 //
-// Background: FIP-0118 states in three places that "reading AggregatedFPV(Q) triggers FinalizeConversion(Q)"
-// (§3.2/§4.1/§4.2). The implementation's aggregatedFPV is aligned: reading auto-triggers the idempotent finalize —
-// after binding, a read before finalize triggers the conversion, returning the complete USD (incl. the FIL component),
-// with the observable side effect isFinalized=true. src/StreamWeightActor.sol has no gating implementation,
-// so this file uses a test contract as the "gating consumer", locking the contract "read yields the complete value,
-// no divergence from submitShares".
+// Background: FIPs#1275 moved the FIL→USD conversion off-chain — FPV is a single USD total, the
+// on-chain FinalizeConversion is gone, and aggregatedFPV is a pure view (no finalize to trigger).
+// These tests lock the contract "aggregatedFPV (view) == submitShares's internal total — no divergence"
+// (the property the spec's "execution order produces no diverging numbers" clause requires).
 // ============================================================================
 
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {Share} from "../src/lib/FVMRewardTypes.sol";
-import {PricePeriod} from "../src/lib/SraTypes.sol";
 import {SRATestBase} from "./SRATestBase.sol";
 
 contract SRAIntegrationTest is SRATestBase {
-    uint256 private _filSalt;
-    uint256 private _stableSalt;
+    uint256 private _salt;
 
     // ------------------------------------------------------------------------
-    // Scenario 1 (core, verifies the spec's "execution order produces no divergent numbers"):
-    // the gating consumer finalizes first -> aggregatedFPV complete -> submitShares's
+    // Scenario 1 (core): the gating consumer reads aggregatedFPV first -> submitShares's
     // SharesSubmitted.totalUsd strictly equals aggregatedFPV (no divergence).
     // ------------------------------------------------------------------------
 
-    /// Orchestrator a: 100e18 stable + 0.5 FIL at 1000 USD/FIL -> FIL component 500e18, total 600e18;
-    /// orchestrator b: pure stablecoin 300e18. total = 900e18.
-    function test_Contract_FinalizeFirst_AggregatedMatchesSubmitTotal() public {
-        PricePeriod[] memory pa = new PricePeriod[](1);
-        pa[0] = _period(5000, 1000, 1, 0.5e18); // cold start, no reference; band check accepts
-        _admitAndPostFil(100e18, pa);
-        _admitAndPostStable(300e18);
+    /// Orchestrator a: 600e18 USD; orchestrator b: 300e18 USD. total = 900e18.
+    function test_Contract_AggregatedMatchesSubmitTotal() public {
+        _admitAndPost(600e18);
+        _admitAndPost(300e18);
 
         _rollTo(_qVerifyEnd(0) + 1); // post-binding
 
-        // the gating consumer triggers conversion first (the spec requires the SWA gating to finalize before reading)
-        sra.finalizeConversion(0);
-        assertTrue(sra.isFinalized(0), "finalized after explicit call");
-        assertEq(sra.aggregatedFPV(0), 900e18, "post-finalize aggregated includes FIL component");
+        assertEq(sra.aggregatedFPV(0), 900e18, "aggregatedFPV sums the bound USD values");
 
         // no divergence: submitShares's internal total must == aggregatedFPV (expectEmit captures totalUsd)
         vm.expectEmit(true, false, false, true, address(sra));
@@ -50,21 +38,17 @@ contract SRAIntegrationTest is SRATestBase {
     }
 
     // ------------------------------------------------------------------------
-    // Scenario 2: after submitShares auto-finalizes, subsequent reads of aggregatedFPV are consistent.
+    // Scenario 2: after submitShares, subsequent reads of aggregatedFPV are consistent.
     // ------------------------------------------------------------------------
 
-    function test_Contract_SubmitSharesAutoFinalize_ThenReadConsistent() public {
-        PricePeriod[] memory pa = new PricePeriod[](1);
-        pa[0] = _period(5000, 1000, 1, 0.5e18);
-        address a = _admitAndPostFil(100e18, pa);
-        address b = _admitAndPostStable(300e18);
+    function test_Contract_SubmitShares_ThenReadConsistent() public {
+        address a = _admitAndPost(600e18);
+        address b = _admitAndPost(300e18);
 
         _rollTo(_qVerifyEnd(0) + 1);
 
-        // no manual finalize: submitShares auto-triggers the conversion (idempotent)
         sra.submitShares(0);
 
-        assertTrue(sra.isFinalized(0), "submitShares auto-finalizes conversion");
         assertEq(sra.aggregatedFPV(0), 900e18, "post-submit aggregated matches final value");
 
         // shares proportional to USD: a:b = 600:300 = 2:1, Σ == 1e18 (largest-remainder tops up the larger remainder a)
@@ -76,52 +60,26 @@ contract SRAIntegrationTest is SRATestBase {
     }
 
     // ------------------------------------------------------------------------
-    // Scenario 3 (aligned with spec §3.2/§4.1/§4.2): reading aggregatedFPV auto-triggers finalize —
-    // after binding without explicit finalize, calling aggregatedFPV yields the complete value (incl. the FIL
-    // component), and isFinalized becomes true (the conversion side effect is observable).
+    // Scenario 3: aggregatedFPV is a pure view — it returns the complete value with no
+    // state change (FIPs#1275: no on-chain finalize to trigger).
     // ------------------------------------------------------------------------
 
-    function test_Contract_ReadAutoFinalizes_ReturnsComplete() public {
-        PricePeriod[] memory pa = new PricePeriod[](1);
-        pa[0] = _period(5000, 1000, 1, 0.5e18);
-        _admitAndPostFil(100e18, pa); // complete 600e18
-        _admitAndPostStable(300e18);
-
-        _rollTo(_qVerifyEnd(0) + 1); // post-binding, no explicit finalize
-
-        // reading auto-triggers finalize: returns the complete value (incl. the FIL component) + isFinalized becomes true
-        assertEq(sra.aggregatedFPV(0), 900e18, "read auto-finalizes: complete value with FIL component");
-        assertTrue(sra.isFinalized(0), "read triggers conversion (aligned with spec)");
+    function test_Contract_AggregatedFPV_PureView() public {
+        _admitAndPost(100e18);
+        _rollTo(_qVerifyEnd(0) + 1); // post-binding
+        assertEq(sra.aggregatedFPV(0), 100e18, "view equals the bound value");
     }
 
     // ------------------------------------------------------------------------
-    // Scenario 4: with no FIL component, stableUSD is the final value — the read auto-triggers (idempotent, no conversion work).
+    // helpers
     // ------------------------------------------------------------------------
 
-    function test_Contract_StableOnly_ViewCompleteWithoutFinalize() public {
-        _admitAndPostStable(100e18);
-        _rollTo(_qVerifyEnd(0) + 1); // post-binding, no finalize
-        assertEq(sra.aggregatedFPV(0), 100e18, "stable-only: view equals final value");
-    }
-
-    // ------------------------------------------------------------------------
-    // helpers (same pattern as SRAShares: increasing salt for unique addresses, roll back to the posting window before posting)
-    // ------------------------------------------------------------------------
-
-    /// @dev Admits and posts an orchestrator with FIL pricing periods (within q=0's posting window).
-    function _admitAndPostFil(uint256 stableUsd, PricePeriod[] memory periods) internal returns (address orch) {
-        orch = makeAddr(string.concat("fil-orch-", vm.toString(_filSalt++)));
+    /// @dev Admits and posts an orchestrator with a single USD total (within q=0's posting window).
+    function _admitAndPost(uint256 usd) internal returns (address orch) {
+        orch = makeAddr(string.concat("orch-", vm.toString(_salt++)));
         _admit(orch);
         vm.roll(_qEnd(0) + 1);
-        _postAs(orch, 0, _fpvWithPeriods(stableUsd, periods));
-    }
-
-    /// @dev Admits and posts a pure-stablecoin orchestrator (within q=0's posting window).
-    function _admitAndPostStable(uint256 stableUsd) internal returns (address orch) {
-        orch = makeAddr(string.concat("stable-orch-", vm.toString(_stableSalt++)));
-        _admit(orch);
-        vm.roll(_qEnd(0) + 1);
-        _postAs(orch, 0, _fpv(stableUsd));
+        _postAs(orch, 0, _fpv(usd));
     }
 
     function _sumShares(Share[] memory shares) internal pure returns (uint256 sum) {

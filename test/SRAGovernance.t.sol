@@ -148,18 +148,17 @@ contract SRAGovernanceTest is SRATestBase {
         _postAs(orch, 0, _fpv(100e18));
 
         vm.roll(_qPostEnd(0) + 1); // verification window
-        FPV memory corrected = _fpv(250e18);
         vm.prank(owner1);
-        sra.correctVolume(orch, 0, corrected);
+        sra.correctVolume(orch, 0, 250e18);
         // after the first vote not effective (not full vote): the value is still the posted value
         FPV memory f1 = sra.fpvOf(0, orch);
-        assertEq(f1.stableUSD, 100e18);
+        assertEq(f1.usd, 100e18);
 
         vm.prank(owner2);
-        sra.correctVolume(orch, 0, corrected); // second vote executes immediately
+        sra.correctVolume(orch, 0, 250e18); // second vote executes immediately
 
         FPV memory f2 = sra.fpvOf(0, orch);
-        assertEq(f2.stableUSD, 250e18);
+        assertEq(f2.usd, 250e18);
     }
 
     /// Strategy 6: before correctVolume's second vote (not a full vote), a repeat vote reverts AlreadyApproved.
@@ -269,8 +268,8 @@ contract SRAGovernanceTest is SRATestBase {
     // E2: constructor parameter validation (deployment-time bounds, aligned with setPricingParams)
     // ------------------------------------------------------------------------
 
-    /// E2: the constructor rejects invalid configuration — priceBand > BASIS_POINTS / maxPricePeriods=0 /
-    ///     minLot > MAX_LOT_USD / epochsPerQuarter=0 (each reverts InvalidParameter at deploy).
+    /// E2: the constructor rejects invalid configuration — priceBand > BASIS_POINTS /
+    ///     epochsPerQuarter=0 (each reverts InvalidParameter at deploy).
     function test_Constructor_InvalidParams_Reverts() public {
         // priceBand > BASIS_POINTS
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
@@ -283,53 +282,13 @@ contract SRAGovernanceTest is SRATestBase {
             SRA_CANCEL_HOLD,
             ACTIVATION_EPOCH,
             MIN_LOT,
-            10001,
-            MAX_PRICE_PERIODS
-        );
-
-        // maxPricePeriods == 0
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        new ServiceRewardsActor(
-            owner1,
-            owner2,
-            EPOCHS_PER_QUARTER,
-            POST_PERIOD,
-            VERIFICATION_WINDOW,
-            SRA_CANCEL_HOLD,
-            ACTIVATION_EPOCH,
-            MIN_LOT,
-            PRICE_BAND,
-            0
-        );
-
-        // minLot > MAX_LOT_USD
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        new ServiceRewardsActor(
-            owner1,
-            owner2,
-            EPOCHS_PER_QUARTER,
-            POST_PERIOD,
-            VERIFICATION_WINDOW,
-            SRA_CANCEL_HOLD,
-            ACTIVATION_EPOCH,
-            1e30 + 1,
-            PRICE_BAND,
-            MAX_PRICE_PERIODS
+            10001
         );
 
         // epochsPerQuarter == 0
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
         new ServiceRewardsActor(
-            owner1,
-            owner2,
-            0,
-            POST_PERIOD,
-            VERIFICATION_WINDOW,
-            SRA_CANCEL_HOLD,
-            ACTIVATION_EPOCH,
-            MIN_LOT,
-            PRICE_BAND,
-            MAX_PRICE_PERIODS
+            owner1, owner2, 0, POST_PERIOD, VERIFICATION_WINDOW, SRA_CANCEL_HOLD, ACTIVATION_EPOCH, MIN_LOT, PRICE_BAND
         );
     }
 

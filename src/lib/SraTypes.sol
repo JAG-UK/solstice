@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
-import {Epoch} from "./Epoch.sol";
-
 // ----------------------------------------------------------------------------
-// Top-level SRA types (test files import from this file: Pair / PricePeriod / FPV)
-// Extracted from ServiceRewardsActor.sol so the storage library (SraStorage.sol) and
-// the actor can share them without a source import cycle.
+// Top-level SRA types (test files import from this file: Pair / FPV)
 // ----------------------------------------------------------------------------
 
 /// @notice (payer, operator) binding pair. C1: the design's §2.3.1 inline tuple-array signature is
@@ -16,21 +12,14 @@ struct Pair {
     address operator;
 }
 
-/// @notice A single FIL pricing period (fee-auction print). Implied rate = lotUsd / claimFil (USD per FIL).
-/// @dev printEpoch uses the Epoch type (review: "use the Epoch type for epochs") instead of a bare uint64.
-struct PricePeriod {
-    Epoch printEpoch; // print settlement epoch
-    uint256 lotUsd; // lot face value (USD, integer)
-    uint256 claimFil; // claim FIL consumed (attoFIL)
-    uint256 attoFil; // FIL amount settled in this period
-}
-
 // forge-lint: disable-next-item(pascal-case-struct) — FPV is the FIP-0118 spec term (public ABI-facing type)
-/// @notice Quarterly FPV: stablecoin face value + FIL pricing-period vector; usdValue is the final value after finalizeConversion.
+/// @notice Quarterly FPV: a single USD-denominated total (FIP-0118 §2.3, FIPs#1275: FIL→USD conversion moved
+///         off-chain, so the SRA no longer stores pricing periods). `usd` is the face-USD stablecoin volume plus
+///         the off-chain-converted FIL volume; `posted` is the at-most-once-per-quarter flag.
+/// @dev uint128: storage-packing optimization — MAX_FPV_USD(1e30) < uint128.max(3.4e38), so `usd` packs with
+///      `posted` into one storage slot (2 -> 1). ABI unchanged (static 32-byte right-aligned encoding is
+///      identical for uint128/uint256); spec defines only "single USD total" semantics, no width.
 struct FPV {
-    // forge-lint: disable-next-line(mixed-case-variable) — spec field name (StableUSD, FIP-0118)
-    uint256 stableUSD; // stablecoin component (face USD)
-    PricePeriod[] filPeriods; // FIL component, <= MAX_PRICE_PERIODS entries
-    uint256 usdValue; // USD final value after FinalizeConversion (0 if unconverted)
+    uint128 usd; // single USD total for the quarter (FPV_i(Q))
     bool posted; // posted flag (at most once per quarter)
 }

@@ -11,9 +11,9 @@ pragma solidity ^0.8.36;
 //
 // Basis: docs/sra-design.md (design, tests, decisions, security review; C1-C8 conflict rulings)
 //   - C1: registerPairs uses a named struct Pair[] (inline tuple-array params are illegal in Solidity)
-//   - C6: the PRICE_BAND reference "last bound qualifying print" is stored in the Quarter namespace (cross-quarter global field)
 //   - T1: largest-remainder method per design §2.5.3 (remainder descending, first residue entries +1)
-//   - D1: all-zero volume -> submitShares submits [{f099, 1e18}] to burn
+//   - FIP-0118 (FIPs#1275): FIL→USD conversion moved off-chain — FPV is a single USD total, no
+//     PricePeriod[]/FinalizeConversion/PRICE_BAND on-chain; all-zero quarter -> SubmitShares no-op
 //   - D2: admitted (incl. frozen) <= 64; Admit rejects when full; only Remove releases; Freeze does not release
 //   - D3a: correctVolume bidirectional correction (unanimousNoHold + in-body verification-window check)
 //   - S5: freeze snapshot uses freezeEpochs/unfreezeEpochs history arrays + paired-interval determination (E+POST instant)
@@ -28,11 +28,10 @@ import {Share} from "./lib/FVMRewardTypes.sol";
 import {OwnersLibrary} from "./lib/Owners.sol";
 import {UnanimousGovernance} from "./lib/UnanimousGovernance.sol";
 import {IsASafe} from "./lib/IsASafe.sol";
-import {BURN_ADDRESS} from "fvm-solidity/FVMActors.sol";
-// Top-level SRA types (Pair / PricePeriod / FPV) and the ERC-7201 storage layout live in
+// Top-level SRA types (Pair / FPV) and the ERC-7201 storage layout live in
 // separate library files (SraTypes.sol / SraStorage.sol) — see review: storage declarations
 // extracted to simplify the #5 proxy refactor; test files import the types from SraTypes.sol.
-import {Pair, PricePeriod, FPV} from "./lib/SraTypes.sol";
+import {Pair, FPV} from "./lib/SraTypes.sol";
 import {SraStorage} from "./lib/SraStorage.sol";
 
 contract ServiceRewardsActor is UnanimousGovernance {
@@ -57,36 +56,16 @@ contract ServiceRewardsActor is UnanimousGovernance {
     uint256 private constant MAX_PAIRS = 64; // registerPairs batch bound (audit C1: aligns with MAX_ORCHESTRATORS)
     uint256 private constant MAX_ALLOWLIST = 64; // per-allowlist array bound (audit F2)
 
-    /// @dev Business-domain upper bounds on the FPV input fields (audit V1/V2/V3 fix).
-    ///      The security review's "Integer overflow ✅ Safe" conclusion (§5.5) relies on an unenforced
-    ///      "business domain ~1e6" assumption; these bounds are now enforced at the input entries
-    ///      (postVolume/correctVolume, via _validateFpvBounds) so the arithmetic in
-    ///      _checkPriceBand / _finalizeConversion / _computeShares cannot overflow:
-    ///        - _checkPriceBand (V1): lotUsd × claimFil × (BASIS_POINTS+band) ≤ 1e30×1e30×12000 ≈ 1.2e64 ≪ 2^256
-    ///        - _finalizeConversion (V2): attoFil × lotUsd ≤ 1e27×1e30 = 1e57 ≪ 2^256
-    ///        - _computeShares (V3): usd per orchestrator ≤ 1e30 + 32×1e57 ≈ 3.3e58 < 2^256/1e18;
-    ///          total (≤ 64) ≤ 64×3.3e58 ≈ 2.1e60 ≪ 2^256
-    ///
-    ///      Magnitude rationale (why 1e30 / 1e27, and why MAX_CLAIM_FIL is not tightened to the FIL supply):
-    ///        - Loose-by-design: the assumed business domain is ~1e6 USD/quarter (§5.5); 1e30 is ~24 orders
-    ///          of magnitude above it (≈ 1e16 × Earth's annual GDP). The bounds are immutable `constant`s,
-    ///          so the looseness is a conscious trade — permanent headroom instead of a tight-but-risky cap —
-    ///          while the arithmetic chain above still closes with ≥ 3.5× headroom at its tightest link (V3).
-    ///        - MAX_ATTO_FIL = 1e27 (= 1e9 FIL) is the chain's keystone and its only *physical* bound:
-    ///          Filecoin's total supply is ~2e9 FIL, so a single print's attoFil can never exceed 1e9 FIL.
-    ///          Loosening it to 1e30 would make per-orchestrator usd ≈ 3.2e61 > 2^256/1e18 and re-open V3.
-    ///        - MAX_CLAIM_FIL = 1e30 is intentionally left at the symmetric value: claimFil sits in the
-    ///          *denominator* of _finalizeConversion (`attoFil × lotUsd / claimFil` — larger only shrinks
-    ///          the result; the only dangerous value is 0, guarded by ZeroClaimFil), and in _checkPriceBand
-    ///          the product 1e30×1e30×12000 ≈ 1.2e64 still leaves ~13 orders of magnitude below 2^256.
-    ///          Tightening it would buy no additional arithmetic safety.
-    ///      ⚠️ Maintenance: the closure assumes all four bounds + MAX_PRICE_PERIODS(32) + MAX_ORCHESTRATORS(64)
-    ///      hold together. If any of these is ever changed, re-derive the chain (§5.5) before shipping —
-    ///      the links are interdependent, not independent.
-    uint256 private constant MAX_STABLE_USD = 1e30; // stablecoin face USD per quarter per orchestrator
-    uint256 private constant MAX_LOT_USD = 1e30; // lot face value USD per print
-    uint256 private constant MAX_CLAIM_FIL = 1e30; // claim FIL per print — bounds the band-check products (V1); denominator in V2 (larger = safer)
-    uint256 private constant MAX_ATTO_FIL = 1e27; // = 1e9 FIL per print — network supply is ~2e9 FIL (V2)
+    /// @dev Business-domain upper bound on the quarterly FPV input (audit V1/V2/V3 fix, post-FIPs#1275).
+    ///      With the FIL→USD conversion moved off-chain (FIPs#1275), the FPV input is a single USD total,
+    ///      so the on-chain arithmetic that must not overflow is only _computeShares (V3):
+    ///        - per-orchestrator usd ≤ 1e30 → usd × SHARE_TOTAL(1e18) ≤ 1e48 ≪ 2^256
+    ///        - total (≤ MAX_ORCHESTRATORS 64) ≤ 64 × 1e30 = 6.4e31 ≪ 2^256
+    ///      Magnitude rationale: the assumed business domain is ~1e6 USD/quarter (§5.5); 1e30 is ~24 orders
+    ///      of magnitude above it — loose-by-design headroom (immutable constant, permanent), while the
+    ///      arithmetic chain still closes with ~200 orders of magnitude to spare.
+    ///      ⚠️ Maintenance: the closure assumes MAX_FPV_USD and MAX_ORCHESTRATORS(64) hold together.
+    uint256 private constant MAX_FPV_USD = 1e30; // single USD total per quarter per orchestrator
 
     // Epoch-typed immutables (review: EPOCHS_PER_QUARTER public — sole source of truth for both the SRA
     // and the SWA; SWA reads it via the auto-generated getter instead of duplicating quarter config).
@@ -131,10 +110,9 @@ contract ServiceRewardsActor is UnanimousGovernance {
     event OrchestratorReplaced(address indexed oldOrch, address indexed newOrch);
     event BindingReassigned(address indexed payer, address indexed operator, address indexed orch);
     event AdmittedListsUpdated(uint256 stablecoinCount, uint256 filecoinPayCount);
-    event PricingParamsUpdated(uint256 minLot, uint256 priceBand, uint256 maxPricePeriods);
+    event PricingParamsUpdated(uint256 minLot, uint256 priceBand);
     event VolumePosted(uint64 indexed q, address indexed orch);
     event VolumeCorrected(uint64 indexed q, address indexed orch);
-    event ConversionFinalized(uint64 indexed q);
     event SharesSubmitted(uint64 indexed q, uint256 recipientCount, uint256 totalUsd);
 
     error NotAdmitted(address orch);
@@ -147,9 +125,8 @@ contract ServiceRewardsActor is UnanimousGovernance {
     error NotInVerificationWindow(uint64 q);
     error NotBound(uint64 q);
     error AlreadyPosted(uint64 q);
-    error TooManyPricePeriods(uint64 q);
-    error PriceBandExceeded(Epoch printEpoch);
-    error ZeroClaimFil();
+    error AlreadySubmitted(uint64 q); // FIP: SubmitShares reverts once a quarter's map is submitted
+    error NotLatestQuarter(uint64 q); // FIP-0118 §4.2: an older quarter's shares can never overwrite a newer quarter's
     error TooManyPairs(); // audit C1: registerPairs batch exceeds MAX_PAIRS
     error InvalidParameter();
 
@@ -163,7 +140,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     /// @param verificationWindow verification window (epochs)
     /// @param cancelHold governance hold (epochs)
     /// @param activationEpoch end epoch of quarter 0 (window start)
-    /// @param minLot,priceBand,maxPricePeriods initial FIL pricing parameters (governable)
+    /// @param minLot,priceBand initial FIL pricing parameters (governable; authoritative for the off-chain indexer, FIPs#1275)
     constructor(
         address owner1,
         address owner2,
@@ -173,8 +150,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         uint64 cancelHold,
         uint64 activationEpoch,
         uint256 minLot,
-        uint256 priceBand,
-        uint256 maxPricePeriods
+        uint256 priceBand
     ) {
         owner1.isProbablyASafe();
         owner2.isProbablyASafe();
@@ -182,7 +158,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         owner2.addOwner();
 
         // audit E2: deployment-time parameter validation, aligned with setPricingParams (G1)
-        require(maxPricePeriods > 0 && priceBand <= BASIS_POINTS && minLot <= MAX_LOT_USD, InvalidParameter());
+        require(priceBand <= BASIS_POINTS, InvalidParameter());
         require(epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0, InvalidParameter());
 
         EPOCHS_PER_QUARTER = Epoch.wrap(epochsPerQuarter);
@@ -194,7 +170,6 @@ contract ServiceRewardsActor is UnanimousGovernance {
         SraStorage.SraStorageParams storage p = _params();
         p.minLot = minLot;
         p.priceBand = priceBand;
-        p.maxPricePeriods = maxPricePeriods;
     }
 
     // ------------------------------------------------------------------------
@@ -285,9 +260,9 @@ contract ServiceRewardsActor is UnanimousGovernance {
         }
     }
 
-    /// @notice During posting, at most one posting per quarter of both components; prints exceeding PRICE_BAND are rejected at posting time (📄 §4.2).
-    /// @dev C3: the FPV input uses the full 4-field structure; usdValue/posted are maintained internally by the SRA (input values ignored).
-    function postVolume(uint64 q, FPV calldata fpv) external {
+    /// @notice During posting, at most one posting per quarter; the value is a single USD total
+    ///         (FPV_i(Q): stablecoin face USD + off-chain-converted FIL volume, FIP-0118 FIPs#1275).
+    function postVolume(uint64 q, uint256 fpv) external {
         // Review: single storage pointer — avoids hashing the orchestrators mapping twice
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.OrchestratorInfo storage o = r.orchestrators[msg.sender];
@@ -295,30 +270,15 @@ contract ServiceRewardsActor is UnanimousGovernance {
         require(!o.frozen, NotFrozen(msg.sender));
         require(_inPostingWindow(q), NotInPostingWindow(q));
 
+        // Audit V1/V2/V3 fix (post-FIPs#1275): the single USD total is the only on-chain input that feeds
+        // _computeShares; bound it at the entry so the share arithmetic cannot overflow (see MAX_FPV_USD).
+        require(fpv <= MAX_FPV_USD, InvalidParameter());
+
         SraStorage.SraStorageQuarter storage qt = _quarter();
         FPV storage stored = qt.fpv[q][msg.sender];
         require(!stored.posted, AlreadyPosted(q));
 
-        uint256 maxPeriods = _params().maxPricePeriods;
-        require(fpv.filPeriods.length <= maxPeriods, TooManyPricePeriods(q));
-
-        // Audit V1/V2/V3 fix: enforce the business-domain upper bounds on the FPV input at the entry —
-        // otherwise extreme lotUsd/claimFil/attoFil/stableUSD could overflow _checkPriceBand /
-        // _finalizeConversion / _computeShares and permanently DoS the network (see _validateFpvBounds).
-        _validateFpvBounds(fpv);
-
-        // PRICE_BAND validation (📄 §3.3 + deviation D aligned): each print is checked against the
-        // "qualifying print of the previous quarter's binding final state" (anchor);
-        // the reference updates at quarter binding (finalize), not at posting — preventing single-batch
-        // chained stepping from drifting the anchor (anchor-manipulation protection).
-        for (uint256 i = 0; i < fpv.filPeriods.length; i++) {
-            _checkPriceBand(fpv.filPeriods[i]);
-        }
-
-        stored.stableUSD = fpv.stableUSD;
-        for (uint256 i = 0; i < fpv.filPeriods.length; i++) {
-            stored.filPeriods.push(fpv.filPeriods[i]);
-        }
+        stored.usd = uint128(fpv); // MAX_FPV_USD(1e30) < uint128.max — safe narrowing (FPV storage packing)
         stored.posted = true;
 
         emit VolumePosted(q, msg.sender);
@@ -455,17 +415,17 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit AdmittedListsUpdated(stablecoins.length, filecoinPayContracts.length);
     }
 
-    /// @notice Updates the FIL pricing parameters MIN_LOT/PRICE_BAND/MAX_PRICE_PERIODS (📄 §3.3/§5.2).
-    function setPricingParams(uint256 minLot, uint256 priceBand, uint256 maxPricePeriods)
+    /// @notice Updates the FIL pricing parameters MIN_LOT/PRICE_BAND (📄 §3.3/§5.2).
+    ///         FIPs#1275: authoritative for the off-chain indexer's conversion, not an on-chain computation.
+    function setPricingParams(uint256 minLot, uint256 priceBand)
         external
         unanimous(keccak256(msg.data), SRA_CANCEL_HOLD)
     {
-        require(maxPricePeriods > 0 && priceBand <= BASIS_POINTS && minLot <= MAX_LOT_USD, InvalidParameter()); // audit B1
+        require(priceBand <= BASIS_POINTS, InvalidParameter()); // audit B1
         SraStorage.SraStorageParams storage p = _params();
         p.minLot = minLot;
         p.priceBand = priceBand;
-        p.maxPricePeriods = maxPricePeriods;
-        emit PricingParamsUpdated(minLot, priceBand, maxPricePeriods);
+        emit PricingParamsUpdated(minLot, priceBand);
     }
 
     /// @notice Either Safe calls _veto alone to discard a queued change (📄 §4.2 + 📘 _veto).
@@ -477,27 +437,20 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // 2.3.3 correctVolume (dual Safe + effective immediately within the window, unanimousNoHold path)
     // ------------------------------------------------------------------------
 
-    /// @notice Only within the verification window, dual-Safe joint; replaces the posted value with the recomputed value
-    ///         or backfills for an unposted orchestrator; exempt from SRA_CANCEL_HOLD (📄 §4.2/§5.3 window-is-hold),
-    ///         allows bidirectional correction (🔍 D3a).
+    /// @notice Only within the verification window, dual-Safe joint; replaces the posted value with the recomputed figure,
+    ///         or supplies the recomputed figure for an unposted orchestrator; exempt from SRA_CANCEL_HOLD (📄 §4.2/§5.3
+    ///         window-is-hold), allows bidirectional correction (🔍 D3a). Value is a single USD total (FIP-0118 FIPs#1275).
     /// @dev The unanimousNoHold modifier handles dual-Safe owner validation; the function body validates the verification window.
-    function correctVolume(address orch, uint64 q, FPV calldata fpv) external unanimousNoHold(keccak256(msg.data)) {
+    function correctVolume(address orch, uint64 q, uint256 value) external unanimousNoHold(keccak256(msg.data)) {
         require(_inVerificationWindow(q), NotInVerificationWindow(q));
         require(_isAdmitted(orch), NotAdmitted(orch));
-        require(fpv.filPeriods.length <= _params().maxPricePeriods, TooManyPricePeriods(q));
 
-        // Audit V1/V2/V3 fix: same business-domain bounds as postVolume (correctVolume is the governance
-        // path into the same FPV storage; it bypasses _checkPriceBand so claimFil > 0 is enforced here too).
-        _validateFpvBounds(fpv);
+        // Audit V1/V2/V3 fix: same business-domain bound as postVolume (governance path into the same FPV storage).
+        require(value <= MAX_FPV_USD, InvalidParameter());
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
         FPV storage stored = qt.fpv[q][orch];
-        stored.stableUSD = fpv.stableUSD;
-        delete stored.filPeriods;
-        for (uint256 i = 0; i < fpv.filPeriods.length; i++) {
-            stored.filPeriods.push(fpv.filPeriods[i]);
-        }
-        stored.usdValue = 0; // cannot be finalized within the window; defensive reset
+        stored.usd = uint128(value); // MAX_FPV_USD(1e30) < uint128.max — safe narrowing (FPV storage packing)
         stored.posted = true;
 
         emit VolumeCorrected(q, orch);
@@ -507,20 +460,22 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // 2.3.4 Mechanism operations (permissionless)
     // ------------------------------------------------------------------------
 
-    /// @notice Callable after the window closes; idempotent; completes the quarter's FIL→USD conversion in one pass (📄 §4.2).
-    function finalizeConversion(uint64 q) external {
-        _finalizeConversion(q);
-    }
-
-    /// @notice Permissionless after binding; triggers conversion (if not yet run) → SplitRule → f02.SetShares(2, map) (📄 §4.2).
+    /// @notice Permissionless after binding; SplitRule over the bound USD values → f02.SetShares(2, map) (📄 §4.2).
+    ///         Reverts when this quarter's map has already been submitted (FIP-0118 §4.2); an all-zero quarter is a
+    ///         benign no-op: SplitRule is not evaluated and the existing share map stands (FIPs#1275, replacing D1 burn).
     function submitShares(uint64 q) external {
         require(_afterBinding(q), NotBound(q));
-        _finalizeConversion(q); // auto-trigger (idempotent)
+        // FIP-0118 §4.2: SubmitShares operates on the **latest** quarter whose volumes are bound, so an
+        // older quarter's shares can never overwrite a newer quarter's. Because _afterBinding is monotonic
+        // in q, q is the latest bound quarter iff q + 1 is not yet bound. (At q = uint64.max the first
+        // require's _qEnd range guard already reverts, so q + 1 cannot overflow here.)
+        require(!_afterBinding(q + 1), NotLatestQuarter(q));
 
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.SraStorageQuarter storage qt = _quarter();
+        require(!qt.sharesSubmitted[q], AlreadySubmitted(q));
 
-        // Collect non-excluded (not frozen at the E+POST instant) orchestrators with usdValue > 0
+        // Collect non-excluded (not frozen at the E+POST instant) orchestrators with posted usd > 0
         address[] memory wallets = new address[](r.admittedList.length);
         uint256[] memory usds = new uint256[](r.admittedList.length);
         uint256 count = 0;
@@ -528,7 +483,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         for (uint256 i = 0; i < r.admittedList.length; i++) {
             address orch = r.admittedList[i];
             if (_frozenAtPostEnd(orch, q)) continue;
-            uint256 usd = qt.fpv[q][orch].usdValue;
+            uint256 usd = qt.fpv[q][orch].usd;
             if (usd == 0) continue;
             wallets[count] = _resolve(orch);
             usds[count] = usd;
@@ -536,31 +491,26 @@ contract ServiceRewardsActor is UnanimousGovernance {
             count++;
         }
 
-        Share[] memory shares;
-        if (total == 0) {
-            // 🔍 D1 all-zero burn: the quarter's service stream is burned (mock verified accepting f099 as a valid
-            // recipient; f02 is expected to special-case f099 via SubmitShares — FIP-0118 tracks immediate burn
-            // accounting without Claim, see docs/sra-design.md §3.1 D1)
-            shares = new Share[](1);
-            shares[0] = Share({wallet: BURN_ADDRESS, share: SHARE_TOTAL});
-        } else {
-            shares = _computeShares(wallets, usds, count, total);
-            // Trim zero-share entries: the largest-remainder method can floor a tiny usdValue to 0
-            // when the residue top-up round count is smaller than the number of orchestrators.
-            // Real f02 SetShares rejects share==0 entries (as does the mock), so drop them here.
-            uint256 kept = 0;
-            for (uint256 i = 0; i < shares.length; i++) {
-                if (shares[i].share > 0) shares[kept++] = shares[i];
+        // FIP-0118: an all-zero quarter is a benign no-op — no SplitRule, no SetShares, existing map stands.
+        if (total == 0) return;
+
+        Share[] memory shares = _computeShares(wallets, usds, count, total);
+        // Trim zero-share entries: the largest-remainder method can floor a tiny usd to 0
+        // when the residue top-up round count is smaller than the number of orchestrators.
+        // Real f02 SetShares rejects share==0 entries (as does the mock), so drop them here.
+        uint256 kept = 0;
+        for (uint256 i = 0; i < shares.length; i++) {
+            if (shares[i].share > 0) shares[kept++] = shares[i];
+        }
+        if (kept < shares.length) {
+            Share[] memory trimmed = new Share[](kept);
+            for (uint256 i = 0; i < kept; i++) {
+                trimmed[i] = shares[i];
             }
-            if (kept < shares.length) {
-                Share[] memory trimmed = new Share[](kept);
-                for (uint256 i = 0; i < kept; i++) {
-                    trimmed[i] = shares[i];
-                }
-                shares = trimmed;
-            }
+            shares = trimmed;
         }
 
+        qt.sharesSubmitted[q] = true; // CEI: mark before the external call
         FVMRewards.setShares(SERVICE_STREAM_ID, shares);
         emit SharesSubmitted(q, shares.length, total);
     }
@@ -570,15 +520,13 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // ------------------------------------------------------------------------
 
     // forge-lint: disable-next-item(mixed-case-function) — FIP-0118 spec method name (selector-affecting)
-    /// @notice Returns the post-binding USD aggregate (stablecoin face value + finalized FIL component); reading auto-triggers idempotent finalize.
-    /// @dev Aligned with the spec's "reading AggregatedFPV triggers FinalizeConversion" (📄 §3.2/§4.1/§4.2): after binding,
-    ///      a read before finalize triggers the conversion (idempotent, same path as submitShares), returning the complete USD
-    ///      (incl. the FIL component), with the observable side effect isFinalized=true.
-    ///      Review: reverts NotBound(q) before binding — distinguishes "quarter not yet bound" (call too early; the SWA
+    /// @notice Returns the post-binding USD aggregate (FIP-0118 §4.2): Σ of each non-excluded posted orchestrator's
+    ///         bound USD value. Pure view — the FIL→USD conversion happens off-chain (FIPs#1275), so there is no
+    ///         on-chain finalize to trigger.
+    /// @dev Review: reverts NotBound(q) before binding — distinguishes "quarter not yet bound" (call too early; the SWA
     ///      does not need to re-enforce the check) from "quarter with zero declared volume" (legitimately returns 0).
-    function aggregatedFPV(uint64 q) external returns (uint256 usd) {
+    function aggregatedFPV(uint64 q) external view returns (uint256 usd) {
         require(_afterBinding(q), NotBound(q));
-        _finalizeConversion(q);
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.SraStorageQuarter storage qt = _quarter();
         for (uint256 i = 0; i < r.admittedList.length; i++) {
@@ -586,7 +534,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
             if (_frozenAtPostEnd(orch, q)) continue;
             FPV storage fpv = qt.fpv[q][orch];
             if (!fpv.posted) continue;
-            usd += fpv.usdValue; // always complete after finalize (incl. the FIL component)
+            usd += fpv.usd;
         }
     }
 
@@ -615,17 +563,13 @@ contract ServiceRewardsActor is UnanimousGovernance {
         return _quarter().fpv[q][orch];
     }
 
-    function isFinalized(uint64 q) external view returns (bool) {
-        return _quarter().conversionFinalized[q];
-    }
-
     function isStablecoinAdmitted(address token) external view returns (bool) {
         return _lists().stablecoins[token];
     }
 
-    function getPricingParams() external view returns (uint256 minLot, uint256 priceBand, uint256 maxPricePeriods) {
+    function getPricingParams() external view returns (uint256 minLot, uint256 priceBand) {
         SraStorage.SraStorageParams storage p = _params();
-        return (p.minLot, p.priceBand, p.maxPricePeriods);
+        return (p.minLot, p.priceBand);
     }
 
     function orchestratorCount() external view returns (uint64) {
@@ -635,50 +579,6 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // ------------------------------------------------------------------------
     // Internal logic
     // ------------------------------------------------------------------------
-
-    /// @dev FIL→USD conversion (idempotent): accumulates attoFil × lotUsd / claimFil for every non-excluded posted orchestrator;
-    ///      sub-MIN_LOT prints do not participate in pricing (deviation B aligned, 📄 §3.3 qualifying-print semantics).
-    ///      On completion updates the PRICE_BAND anchor = the quarter's last qualifying (lotUsd >= minLot) print
-    ///      (deviation D aligned: the reference updates at quarter binding; correctVolume has already completed within the
-    ///      verification window, so finalize reads the final-state values).
-    function _finalizeConversion(uint64 q) internal {
-        require(_afterBinding(q), NotBound(q));
-        SraStorage.SraStorageQuarter storage qt = _quarter();
-        if (qt.conversionFinalized[q]) return;
-
-        SraStorage.SraStorageRegistry storage r = _registry();
-        uint256 minLot = _params().minLot;
-        for (uint256 i = 0; i < r.admittedList.length; i++) {
-            address orch = r.admittedList[i];
-            if (_frozenAtPostEnd(orch, q)) continue;
-            FPV storage fpv = qt.fpv[q][orch];
-            if (!fpv.posted) continue;
-            uint256 usd = fpv.stableUSD;
-            for (uint256 j = 0; j < fpv.filPeriods.length; j++) {
-                PricePeriod storage p = fpv.filPeriods[j];
-                if (p.lotUsd < minLot) continue; // B: sub-MIN_LOT does not participate in pricing
-                usd += p.attoFil * p.lotUsd / p.claimFil; // integer precision (✏️ S9)
-            }
-            fpv.usdValue = usd;
-        }
-        qt.conversionFinalized[q] = true;
-        emit ConversionFinalized(q);
-
-        // D: anchor update = the quarter's last qualifying print (overwrite-style traversal;
-        //    _updateLastBoundPrint filters sub-MIN_LOT internally).
-        //    The traversal order is the anchor order: the last qualifying print by admittedList admission order
-        //    (a rare edge of cross-orchestrator out-of-order posting; the anchor is always a qualifying print and
-        //    band validation only constrains deviation, so this is not manipulable — defensible).
-        for (uint256 i = 0; i < r.admittedList.length; i++) {
-            address orch = r.admittedList[i];
-            if (_frozenAtPostEnd(orch, q)) continue;
-            FPV storage fpv = qt.fpv[q][orch];
-            if (!fpv.posted) continue;
-            for (uint256 j = 0; j < fpv.filPeriods.length; j++) {
-                _updateLastBoundPrint(fpv.filPeriods[j]);
-            }
-        }
-    }
 
     /// @dev SplitRule share computation: floor + largest-remainder method (design §2.5.3, T1: remainder descending, first residue entries +1).
     function _computeShares(address[] memory wallets, uint256[] memory usds, uint256 n, uint256 total)
@@ -708,59 +608,6 @@ contract ServiceRewardsActor is UnanimousGovernance {
             bumped[best] = true;
             shares[best].share += 1;
         }
-    }
-
-    /// @dev Business-domain upper-bound validation of an FPV input (audit V1/V2/V3 fix; root cause:
-    ///      the FPV fields had no upper bound while the §5.5 "overflow safe" conclusion relies on bounded
-    ///      inputs). Enforced at both input entries (postVolume / correctVolume); also enforces claimFil > 0
-    ///      here so correctVolume — which does not run _checkPriceBand — cannot introduce a divide-by-zero
-    ///      (attoFil × lotUsd / claimFil) at finalize.
-    function _validateFpvBounds(FPV calldata fpv) internal pure {
-        require(fpv.stableUSD <= MAX_STABLE_USD, InvalidParameter());
-        for (uint256 i = 0; i < fpv.filPeriods.length; i++) {
-            PricePeriod calldata p = fpv.filPeriods[i];
-            require(p.claimFil > 0, ZeroClaimFil());
-            require(p.lotUsd <= MAX_LOT_USD, InvalidParameter());
-            require(p.claimFil <= MAX_CLAIM_FIL, InvalidParameter());
-            require(p.attoFil <= MAX_ATTO_FIL, InvalidParameter());
-        }
-    }
-
-    /// @dev PRICE_BAND validation: a new print's implied rate deviates from the "qualifying print of the previous
-    ///      quarter's binding final state" (anchor) by at most band (basis points).
-    ///      The anchor updates at quarter binding (finalize) (deviation D aligned); cold start (no anchor) accepts;
-    ///      sub-MIN_LOT prints do not participate in pricing (deviation B aligned: skipped, never become the reference, 📄 §3.3).
-    function _checkPriceBand(PricePeriod calldata p) internal view {
-        require(p.claimFil > 0, ZeroClaimFil());
-        // Review-⑤ pattern: single storage pointer — avoids hashing the params namespace twice.
-        SraStorage.SraStorageParams storage prm = _params();
-        if (p.lotUsd < prm.minLot) return; // B: sub-MIN_LOT does not participate in pricing (not validated)
-        SraStorage.SraStorageQuarter storage qt = _quarter();
-        if (!qt.hasBoundPrint) return; // cold start / auction drought: no previous print to deviate from -> accepted
-
-        uint256 priceBand = prm.priceBand;
-        // newRate/lastRate = (p.lotUsd/p.claimFil) / (last.lotUsd/last.claimFil)
-        //   = p.lotUsd * last.claimFil / (last.lotUsd * p.claimFil)
-        // band constraint: |newRate/lastRate - 1| <= band/10000
-        //   ⇔ (10000-band)/10000 <= ratio <= (10000+band)/10000
-        uint256 lhs = p.lotUsd * qt.lastBoundPrintClaimFil * BASIS_POINTS;
-        uint256 lower = qt.lastBoundPrintLotUsd * p.claimFil * (BASIS_POINTS - priceBand);
-        uint256 upper = qt.lastBoundPrintLotUsd * p.claimFil * (BASIS_POINTS + priceBand);
-        require(lhs >= lower && lhs <= upper, PriceBandExceeded(p.printEpoch));
-    }
-
-    /// @dev Updates the PRICE_BAND anchor (only called in _finalizeConversion, deviation D aligned);
-    ///      sub-MIN_LOT prints never become the reference (deviation B aligned).
-    function _updateLastBoundPrint(PricePeriod storage p) internal {
-        if (p.lotUsd < _params().minLot) return; // B: sub-MIN_LOT does not participate in pricing (never the reference)
-        // Audit V1 deep defense: never let an out-of-domain print become the anchor, even if a future entry
-        // bypasses _validateFpvBounds — the anchor must stay within the band-check overflow bound
-        // (lastBoundPrintLotUsd × claimFil × (BASIS_POINTS+band) ≤ 1e30×1e30×12000 ≈ 1.2e64 ≪ 2^256).
-        if (p.lotUsd > MAX_LOT_USD || p.claimFil > MAX_CLAIM_FIL) return;
-        SraStorage.SraStorageQuarter storage qt = _quarter();
-        qt.lastBoundPrintLotUsd = p.lotUsd;
-        qt.lastBoundPrintClaimFil = p.claimFil;
-        qt.hasBoundPrint = true;
     }
 
     function _isAdmitted(address orch) internal view returns (bool) {

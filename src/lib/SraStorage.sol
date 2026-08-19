@@ -40,18 +40,15 @@ library SraStorage {
     /// @custom:storage-location erc7201:Solstice.SRA.Quarter
     struct SraStorageQuarter {
         mapping(uint64 Q => mapping(address orch => FPV)) fpv;
-        mapping(uint64 Q => bool) conversionFinalized; // idempotency flag
-        // C6: PRICE_BAND reference — the rate of the last bound qualifying print (rational pair; anchored, updated at finalize)
-        uint256 lastBoundPrintLotUsd;
-        uint256 lastBoundPrintClaimFil;
-        bool hasBoundPrint; // cold-start flag (system never had a qualifying print -> no reference to reject against, accepted)
+        // FIP-0118 (FIPs#1275): FIL→USD conversion moved off-chain — no FinalizeConversion,
+        // no PRICE_BAND anchor state (lastBoundPrint/hasBoundPrint) on-chain anymore.
+        mapping(uint64 Q => bool) sharesSubmitted; // FIP: SubmitShares reverts once a quarter's map is submitted
     }
 
     /// @custom:storage-location erc7201:Solstice.SRA.Params
     struct SraStorageParams {
-        uint256 minLot; // MIN_LOT (thin auction guardrail)
-        uint256 priceBand; // PRICE_BAND (basis points)
-        uint256 maxPricePeriods; // MAX_PRICE_PERIODS
+        uint256 minLot; // MIN_LOT (FIP §2.3: governs the off-chain conversion, not an on-chain computation)
+        uint256 priceBand; // PRICE_BAND (basis points; same — authoritative parameter for the off-chain indexer)
     }
 
     // keccak256(abi.encode(uint256(keccak256(namespace)) - 1)) & ~bytes32(uint256(0xff)) — precomputed and hardcoded

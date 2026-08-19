@@ -24,7 +24,7 @@ pragma solidity ^0.8.36;
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
-import {Pair, PricePeriod} from "../src/lib/SraTypes.sol";
+import {Pair} from "../src/lib/SraTypes.sol";
 import {IsASafe} from "../src/lib/IsASafe.sol";
 import {SRATestBase} from "./SRATestBase.sol";
 
@@ -85,18 +85,17 @@ contract SRAAdversarial is SRATestBase {
         sra.correctVolume(orch, type(uint64).max, _fpv(100e18));
     }
 
-    /// finalizeConversion on a future quarter (before its binding) -> NotBound(q).
-    function test_FinalizeConversion_FutureQuarter_NotBound() public {
+    /// aggregatedFPV on a future quarter (before its binding) -> NotBound(q).
+    function test_AggregatedFPV_FutureQuarter_NotBound() public {
         vm.roll(_qVerifyEnd(0) + 1); // Q0 binding complete
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotBound.selector, uint64(10)));
-        sra.finalizeConversion(10);
+        sra.aggregatedFPV(10);
     }
 
-    /// q = uint64.max on finalizeConversion -> _qEnd range guard fires (uint64 width) -> InvalidParameter.
-    function test_FinalizeConversion_MaxQuarter_RangeGuard_InvalidParameter() public {
-        vm.roll(_qVerifyEnd(0) + 1);
+    /// q = uint64.max on qEnd -> _qEnd range guard fires (uint64 width) -> InvalidParameter.
+    function test_QEnd_MaxQuarter_RangeGuard_InvalidParameter() public {
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.finalizeConversion(type(uint64).max);
+        sra.qEnd(type(uint64).max);
     }
 
     /// q = uint64.max on submitShares -> _afterBinding calls _qEnd, guard fires (uint64 width) -> InvalidParameter.
@@ -109,42 +108,39 @@ contract SRAAdversarial is SRATestBase {
     /// The _qEnd range guard itself, exercised directly: with EPOCHS_PER_QUARTER = 2^40,
     /// uint64.max × 2^40 ≈ 2^104 > 2^64 -> end beyond type(uint64).max -> InvalidParameter
     /// (same rejection path as the MaxQuarter probes above, but with a config-amplified q).
-    function test_FinalizeConversion_HugeQuarter_RangeGuard_InvalidParameter() public {
-        // finalizeConversion needs no admitted orchestrator; only the window check runs.
+    function test_QEnd_HugeQuarter_RangeGuard_InvalidParameter() public {
         ServiceRewardsActor big = new ServiceRewardsActor(
             owner1,
             owner2,
-            1 << 40, // EPOCHS_PER_QUARTER: uint64.max × 2^40 ≈ 2^104 > 2^96
+            1 << 40, // EPOCHS_PER_QUARTER: uint64.max × 2^40 ≈ 2^104 > 2^64
             POST_PERIOD,
             VERIFICATION_WINDOW,
             SRA_CANCEL_HOLD,
             ACTIVATION_EPOCH,
             MIN_LOT,
-            PRICE_BAND,
-            MAX_PRICE_PERIODS
+            PRICE_BAND
         );
-        vm.roll(1);
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        big.finalizeConversion(type(uint64).max);
+        big.qEnd(type(uint64).max);
     }
 
     // ------------------------------------------------------------------------
-    // 2. FPV field exact-limit boundaries (accept at limit / reject limit+1)
-    //    Q0 cold start (no anchor) isolates _validateFpvBounds from the band check.
+    // 2. FPV single-USD-total exact-limit boundaries (accept at limit / reject limit+1)
+    //    (FIP-0118 FIPs#1275: FPV is a single USD total; MAX_FPV_USD = 1e30 domain bound)
     // ------------------------------------------------------------------------
 
-    /// stableUSD == MAX_STABLE_USD(1e30) is accepted (domain boundary).
-    function test_Fpv_StableUsd_AtMax_Accepted() public {
+    /// usd == MAX_FPV_USD(1e30) is accepted (domain boundary).
+    function test_Fpv_Usd_AtMax_Accepted() public {
         address orch = makeAddr("orch");
         _admit(orch);
 
         vm.roll(_qEnd(0) + 1);
         _postAs(orch, 0, _fpv(1e30));
-        assertEq(sra.fpvOf(0, orch).stableUSD, 1e30);
+        assertEq(sra.fpvOf(0, orch).usd, 1e30);
     }
 
-    /// stableUSD == MAX_STABLE_USD + 1 is rejected with InvalidParameter.
-    function test_Fpv_StableUsd_OverMax_Rejected() public {
+    /// usd == MAX_FPV_USD + 1 is rejected with InvalidParameter.
+    function test_Fpv_Usd_OverMax_Rejected() public {
         address orch = makeAddr("orch");
         _admit(orch);
 
@@ -152,81 +148,6 @@ contract SRAAdversarial is SRATestBase {
         vm.prank(orch);
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
         sra.postVolume(0, _fpv(1e30 + 1));
-    }
-
-    /// lotUsd == MAX_LOT_USD(1e30) is accepted (cold start: band check returns).
-    function test_Fpv_LotUsd_AtMax_Accepted() public {
-        address orch = makeAddr("orch");
-        _admit(orch);
-
-        vm.roll(_qEnd(0) + 1);
-        PricePeriod[] memory ps = new PricePeriod[](1);
-        ps[0] = _period(uint64(block.number), 1e30, 1, 1e18);
-        _postAs(orch, 0, _fpvWithPeriods(0, ps));
-        assertEq(sra.fpvOf(0, orch).filPeriods[0].lotUsd, 1e30);
-    }
-
-    /// lotUsd == MAX_LOT_USD + 1 is rejected with InvalidParameter.
-    function test_Fpv_LotUsd_OverMax_Rejected() public {
-        address orch = makeAddr("orch");
-        _admit(orch);
-
-        vm.roll(_qEnd(0) + 1);
-        PricePeriod[] memory ps = new PricePeriod[](1);
-        ps[0] = _period(uint64(block.number), 1e30 + 1, 1, 1e18);
-        vm.prank(orch);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.postVolume(0, _fpvWithPeriods(0, ps));
-    }
-
-    /// claimFil == MAX_CLAIM_FIL(1e30) is accepted (lotUsd = MIN_LOT keeps it a qualifying print).
-    function test_Fpv_ClaimFil_AtMax_Accepted() public {
-        address orch = makeAddr("orch");
-        _admit(orch);
-
-        vm.roll(_qEnd(0) + 1);
-        PricePeriod[] memory ps = new PricePeriod[](1);
-        ps[0] = _period(uint64(block.number), MIN_LOT, 1e30, 1e18);
-        _postAs(orch, 0, _fpvWithPeriods(0, ps));
-        assertEq(sra.fpvOf(0, orch).filPeriods[0].claimFil, 1e30);
-    }
-
-    /// claimFil == MAX_CLAIM_FIL + 1 is rejected with InvalidParameter.
-    function test_Fpv_ClaimFil_OverMax_Rejected() public {
-        address orch = makeAddr("orch");
-        _admit(orch);
-
-        vm.roll(_qEnd(0) + 1);
-        PricePeriod[] memory ps = new PricePeriod[](1);
-        ps[0] = _period(uint64(block.number), MIN_LOT, 1e30 + 1, 1e18);
-        vm.prank(orch);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.postVolume(0, _fpvWithPeriods(0, ps));
-    }
-
-    /// attoFil == MAX_ATTO_FIL(1e27 = 1e9 FIL) is accepted.
-    function test_Fpv_AttoFil_AtMax_Accepted() public {
-        address orch = makeAddr("orch");
-        _admit(orch);
-
-        vm.roll(_qEnd(0) + 1);
-        PricePeriod[] memory ps = new PricePeriod[](1);
-        ps[0] = _period(uint64(block.number), MIN_LOT, 1, 1e27);
-        _postAs(orch, 0, _fpvWithPeriods(0, ps));
-        assertEq(sra.fpvOf(0, orch).filPeriods[0].attoFil, 1e27);
-    }
-
-    /// attoFil == MAX_ATTO_FIL + 1 is rejected with InvalidParameter.
-    function test_Fpv_AttoFil_OverMax_Rejected() public {
-        address orch = makeAddr("orch");
-        _admit(orch);
-
-        vm.roll(_qEnd(0) + 1);
-        PricePeriod[] memory ps = new PricePeriod[](1);
-        ps[0] = _period(uint64(block.number), MIN_LOT, 1, 1e27 + 1);
-        vm.prank(orch);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.postVolume(0, _fpvWithPeriods(0, ps));
     }
 
     // ------------------------------------------------------------------------
@@ -297,48 +218,41 @@ contract SRAAdversarial is SRATestBase {
     //     remaining accept edges of each parameter)
     // ------------------------------------------------------------------------
 
-    function _setPricingParams(uint256 minLot, uint256 priceBand, uint256 maxPricePeriods) internal {
+    function _setPricingParams(uint256 minLot, uint256 priceBand) internal {
         vm.prank(owner1);
-        sra.setPricingParams(minLot, priceBand, maxPricePeriods);
+        sra.setPricingParams(minLot, priceBand);
         vm.prank(owner2);
-        sra.setPricingParams(minLot, priceBand, maxPricePeriods);
+        sra.setPricingParams(minLot, priceBand);
         vm.roll(block.number + SRA_CANCEL_HOLD);
-        sra.setPricingParams(minLot, priceBand, maxPricePeriods);
+        sra.setPricingParams(minLot, priceBand);
     }
 
     /// priceBand = 0 (tightest band) is a valid parameter — accepted.
     function test_SetPricingParams_PriceBandZero_Accepted() public {
-        _setPricingParams(MIN_LOT, 0, MAX_PRICE_PERIODS);
-        (uint256 minLot, uint256 priceBand,) = sra.getPricingParams();
+        _setPricingParams(MIN_LOT, 0);
+        (uint256 minLot, uint256 priceBand) = sra.getPricingParams();
         assertEq(minLot, MIN_LOT);
         assertEq(priceBand, 0);
     }
 
     /// priceBand = BASIS_POINTS (100%) is a valid parameter — accepted.
     function test_SetPricingParams_PriceBandFull_Accepted() public {
-        _setPricingParams(MIN_LOT, 10_000, MAX_PRICE_PERIODS);
-        (, uint256 priceBand,) = sra.getPricingParams();
+        _setPricingParams(MIN_LOT, 10_000);
+        (, uint256 priceBand) = sra.getPricingParams();
         assertEq(priceBand, 10_000);
     }
 
-    /// maxPricePeriods = 1 (smallest > 0) is accepted.
-    function test_SetPricingParams_MaxPeriodsOne_Accepted() public {
-        _setPricingParams(MIN_LOT, PRICE_BAND, 1);
-        (,, uint256 maxPeriods) = sra.getPricingParams();
-        assertEq(maxPeriods, 1);
-    }
-
-    /// minLot = MAX_LOT_USD (largest allowed) is accepted.
-    function test_SetPricingParams_MinLotAtMax_Accepted() public {
-        _setPricingParams(1e30, PRICE_BAND, MAX_PRICE_PERIODS);
-        (uint256 minLot,,) = sra.getPricingParams();
+    /// minLot = 1e30 (large) is accepted (governance-trusted parameter for the off-chain indexer).
+    function test_SetPricingParams_MinLotLarge_Accepted() public {
+        _setPricingParams(1e30, PRICE_BAND);
+        (uint256 minLot,) = sra.getPricingParams();
         assertEq(minLot, 1e30);
     }
 
     /// minLot = 0 (no floor) is accepted.
     function test_SetPricingParams_MinLotZero_Accepted() public {
-        _setPricingParams(0, PRICE_BAND, MAX_PRICE_PERIODS);
-        (uint256 minLot,,) = sra.getPricingParams();
+        _setPricingParams(0, PRICE_BAND);
+        (uint256 minLot,) = sra.getPricingParams();
         assertEq(minLot, 0);
     }
 
@@ -406,7 +320,6 @@ contract SRAAdversarial is SRATestBase {
         _postAs(b, 0, _fpv(1e30));
 
         vm.roll(_qVerifyEnd(0) + 1);
-        sra.finalizeConversion(0);
         sra.submitShares(0);
 
         Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);

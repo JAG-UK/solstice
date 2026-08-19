@@ -230,7 +230,7 @@ contract SRARegistryTest is SRATestBase {
         vm.roll(_qEnd(0) + 1);
         _postAs(orch, 0, _fpv(100e18)); // can post after restore
         FPV memory f = sra.fpvOf(0, orch);
-        assertEq(f.stableUSD, 100e18);
+        assertEq(f.usd, 100e18);
     }
 
     // ------------------------------------------------------------------------
@@ -528,6 +528,6 @@ contract SRARegistryTest is SRATestBase {
         vm.roll(_qEnd(1) + 1); // quarter 1 posting window
         _postAs(oldOrch, 1, _fpv(100e18)); // not reverting proves normal operation
         FPV memory f = sra.fpvOf(1, oldOrch);
-        assertEq(f.stableUSD, 100e18);
+        assertEq(f.usd, 100e18);
     }
 }

@@ -17,8 +17,7 @@ contract ComputeSharesHarness is ServiceRewardsActor {
             uint64(0), // cancelHold
             uint64(0), // activationEpoch
             0, // minLot
-            0, // priceBand
-            0 // maxPricePeriods
+            0 // priceBand
         )
     {}
 }
