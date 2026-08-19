@@ -22,6 +22,7 @@ remappings = [
 severity = ["high", "med", "low", "info", "gas", "code-size"]
 exclude_lints = [
     "incorrect-shift",
+    "mixed-case-function",
     "multi-contract-file",
     "unsafe-typecast",
     "unwrapped-modifier-logic",

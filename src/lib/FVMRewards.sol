@@ -7,6 +7,7 @@ import {NO_FLAGS} from "fvm-solidity/FVMFlags.sol";
 import {CBOR_CODEC} from "fvm-solidity/FVMCodec.sol";
 import {EXIT_SUCCESS} from "fvm-solidity/FVMErrors.sol";
 
+import {Epoch} from "./Epoch.sol";
 import {
     REGISTER_STREAM,
     REMOVE_STREAM,
@@ -185,7 +186,7 @@ library FVMRewards {
         p = _writeArrayHeader(p, 5);
         p = _writeUint(p, _u64(r.vStart));
         p = _writeInt(p, r.slope);
-        p = _writeInt(p, int256(uint256(r.tStart)));
+        p = _writeInt(p, int256(uint256(Epoch.unwrap(r.tStart))));
         p = _writeUint(p, _u64(r.floor));
         p = _writeUint(p, _u64(r.cap));
         return p;

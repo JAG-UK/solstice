@@ -5,6 +5,7 @@ import {FVMAddress} from "fvm-solidity/FVMAddress.sol";
 
 import {MockRewardWireTest} from "./MockRewardWireTest.sol";
 import {WeightRecord, WeightRecordUpdate, Share, PendingOp} from "../../src/lib/FVMRewardTypes.sol";
+import {Epoch} from "../../src/lib/Epoch.sol";
 import {FVMRewards} from "../../src/lib/FVMRewards.sol";
 
 /// @dev Tests to match with Rust `fil_actor_reward` tests/types_test.rs `mod serialization`, whose
@@ -23,7 +24,7 @@ contract FVMRewardWireTest is MockRewardWireTest {
         pure
         returns (WeightRecord memory)
     {
-        return WeightRecord({vStart: vStart, slope: slope, tStart: tStart, floor: floor, cap: cap});
+        return WeightRecord({vStart: vStart, slope: slope, tStart: Epoch.wrap(tStart), floor: floor, cap: cap});
     }
 
     function _sent() internal view returns (bytes memory) {

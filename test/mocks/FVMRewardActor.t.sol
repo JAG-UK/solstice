@@ -26,6 +26,7 @@ import {
 import {CLAIM, SWA_TIMELOCK} from "../../src/lib/FVMRewardMethod.sol";
 import {FVMRewards} from "../../src/lib/FVMRewards.sol";
 import {WeightRecordUpdate} from "../../src/lib/FVMRewardTypes.sol";
+import {Epoch} from "../../src/lib/Epoch.sol";
 
 /// @dev A distinct external caller, so tests can check authorization by identity rather than
 /// by happenstance of who the test contract is. The typed methods below go through FVMRewards
@@ -133,7 +134,7 @@ contract FVMRewardActorTest is MockRewardTest {
         pure
         returns (WeightRecord memory)
     {
-        return WeightRecord({vStart: vStart, slope: slope, tStart: tStart, floor: floor, cap: cap});
+        return WeightRecord({vStart: vStart, slope: slope, tStart: Epoch.wrap(tStart), floor: floor, cap: cap});
     }
 
     /// @dev A record whose weight is the constant `w` at every epoch.

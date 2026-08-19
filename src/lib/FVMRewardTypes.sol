@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
+import {Epoch} from "./Epoch.sol";
+
 /// @notice A stream's Distribution kind (FIP-0118 Section 2.4).
 /// @dev IMPLICIT streams store no writer (f02 resolves the recipient from protocol state).
 ///      EXPLICIT streams are paid out per a wallet-to-share map written by their designated writer.
@@ -14,7 +16,7 @@ enum DistributionKind {
 struct WeightRecord {
     int256 vStart;
     int256 slope;
-    uint64 tStart;
+    Epoch tStart;
     int256 floor;
     int256 cap;
 }

@@ -19,6 +19,7 @@ import {
     SWA_TIMELOCK
 } from "../../src/lib/FVMRewardMethod.sol";
 import {WeightRecord, DistributionKind, Share, PendingOp} from "../../src/lib/FVMRewardTypes.sol";
+import {Epoch} from "../../src/lib/Epoch.sol";
 
 /// @dev Weights, and per-orchestrator shares, are WAD-scaled: 1e18 == 1.0 == 100%.
 int256 constant WAD = 1e18;
@@ -395,7 +396,7 @@ contract FVMRewardActor {
                     id: 0,
                     op: k.op,
                     effectiveEpoch: _pendingWeight[k.op].effectiveEpoch,
-                    weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: 0, floor: 0, cap: 0}),
+                    weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: Epoch.wrap(0), floor: 0, cap: 0}),
                     distributionKind: DistributionKind.IMPLICIT,
                     writer: address(0)
                 });
@@ -504,7 +505,7 @@ contract FVMRewardActor {
             PendingOp.REMOVE,
             Pending({
                 effectiveEpoch: uint64(block.number) + swaTimelockEpochs,
-                weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: 0, floor: 0, cap: 0}),
+                weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: Epoch.wrap(0), floor: 0, cap: 0}),
                 distributionKind: DistributionKind.IMPLICIT,
                 writer: address(0)
             })
@@ -539,7 +540,7 @@ contract FVMRewardActor {
             PendingOp.SET_DISTRIBUTION,
             Pending({
                 effectiveEpoch: uint64(block.number) + swaTimelockEpochs,
-                weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: 0, floor: 0, cap: 0}),
+                weightRecord: WeightRecord({vStart: 0, slope: 0, tStart: Epoch.wrap(0), floor: 0, cap: 0}),
                 distributionKind: DistributionKind.EXPLICIT,
                 writer: writer
             })
@@ -751,7 +752,7 @@ contract FVMRewardActor {
         (tStart, pos) = _decodeCborUint64(pos);
         (floor, pos) = _decodeCborInt64(pos);
         (cap, pos) = _decodeCborInt64(pos);
-        record = WeightRecord({vStart: vStart, slope: slope, tStart: tStart, floor: floor, cap: cap});
+        record = WeightRecord({vStart: vStart, slope: slope, tStart: Epoch.wrap(tStart), floor: floor, cap: cap});
         newPos = pos;
     }
 
@@ -974,7 +975,7 @@ contract FVMRewardActor {
 
     /// @dev clamp(v_start + slope * (e - t_start), floor, cap).
     function _clampWeight(WeightRecord memory w, uint64 e) internal pure returns (int256 weight) {
-        int256 raw = w.vStart + w.slope * (int256(uint256(e)) - int256(uint256(w.tStart)));
+        int256 raw = w.vStart + w.slope * (int256(uint256(e)) - int256(uint256(Epoch.unwrap(w.tStart))));
         weight = raw < w.floor ? w.floor : (raw > w.cap ? w.cap : raw);
     }
 
@@ -1038,12 +1039,12 @@ contract FVMRewardActor {
         pure
         returns (uint256)
     {
-        if (r.tStart >= fromEpoch) out[c++] = r.tStart;
+        if (Epoch.unwrap(r.tStart) >= fromEpoch) out[c++] = Epoch.unwrap(r.tStart);
         if (r.slope == 0) return c;
 
         c = _crossing(r, r.slope > 0 ? r.cap : r.floor, fromEpoch, out, c);
         // The opposite bound is only crossed going forward when validation starts before the anchor.
-        if (fromEpoch < r.tStart) c = _crossing(r, r.slope > 0 ? r.floor : r.cap, fromEpoch, out, c);
+        if (fromEpoch < Epoch.unwrap(r.tStart)) c = _crossing(r, r.slope > 0 ? r.floor : r.cap, fromEpoch, out, c);
         return c;
     }
 
@@ -1052,7 +1053,7 @@ contract FVMRewardActor {
         pure
         returns (uint256)
     {
-        int256 base = int256(uint256(r.tStart)) + (bound - r.vStart) / r.slope;
+        int256 base = int256(uint256(Epoch.unwrap(r.tStart))) + (bound - r.vStart) / r.slope;
         for (int256 off = -1; off <= 1; off++) {
             int256 e = base + off;
             if (e >= int256(uint256(fromEpoch)) && e <= int256(uint256(type(uint64).max))) {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
-type Epoch is uint96;
+type Epoch is uint64;
 
 using {
     add as +,
