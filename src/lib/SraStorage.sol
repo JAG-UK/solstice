@@ -5,11 +5,9 @@ import {Epoch} from "./Epoch.sol";
 import {FPV} from "./SraTypes.sol";
 
 // ----------------------------------------------------------------------------
-// SRA ERC-7201 storage layout (4 namespaces) + precomputed slots.
-// Extracted from ServiceRewardsActor.sol into a library (review: "Moving these storage
-// declarations to a separate library file will simplify the #5 refactor") so the #5
-// proxy refactor can share the exact same storage namespace definitions between the
-// proxy and the implementation — a single source of truth for the storage layout.
+// SRA ERC-7201 storage layout (4 namespaces) + precomputed slots, in a shared
+// library so the #5 proxy refactor can use the exact same namespace definitions
+// between proxy and implementation — a single source of truth for the storage layout.
 // ----------------------------------------------------------------------------
 
 library SraStorage {

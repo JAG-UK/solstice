@@ -31,10 +31,6 @@ contract QuarterWindowHarness is ServiceRewardsActor {
         )
     {}
 
-    // qEnd moved to ServiceRewardsActor (review): the actor now exposes
-    // `qEnd(uint64) external view returns (Epoch)` (IServiceRewardsActor interface);
-    // this harness inherits it, and the check contract reads `_qEnd` inline.
-
     /// @dev posting window (E, E+POST].
     function inPostingWindow(uint64 q) external view returns (bool) {
         return _inPostingWindow(q);

@@ -5,7 +5,7 @@ pragma solidity ^0.8.36;
 // Top-level SRA types (test files import from this file: Pair / FPV)
 // ----------------------------------------------------------------------------
 
-/// @notice (payer, operator) binding pair. C1: the design's §2.3.1 inline tuple-array signature is
+/// @notice (payer, operator) binding pair. The design's §2.3.1 inline tuple-array signature is
 ///         illegal in Solidity 0.8.36 (Error 3546); replaced with a named struct (ABI encoding is still a tuple array).
 struct Pair {
     address payer;

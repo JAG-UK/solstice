@@ -29,8 +29,8 @@ import {OwnersLibrary} from "./lib/Owners.sol";
 import {UnanimousGovernance} from "./lib/UnanimousGovernance.sol";
 import {IsASafe} from "./lib/IsASafe.sol";
 // Top-level SRA types (Pair / FPV) and the ERC-7201 storage layout live in
-// separate library files (SraTypes.sol / SraStorage.sol) — see review: storage declarations
-// extracted to simplify the #5 proxy refactor; test files import the types from SraTypes.sol.
+// separate library files (SraTypes.sol / SraStorage.sol) — extracted to simplify
+// the #5 proxy refactor; test files import the types from SraTypes.sol.
 import {Pair, FPV} from "./lib/SraTypes.sol";
 import {SraStorage} from "./lib/SraStorage.sol";
 
@@ -48,17 +48,17 @@ contract ServiceRewardsActor is UnanimousGovernance {
     /// @dev Total share (f02 encoding constraint: Σ shares must be exactly == 1e18).
     uint256 private constant SHARE_TOTAL = 1e18;
 
-    /// @dev PRICE_BAND in basis points (10000 = 100%). Test assumption H-band: 2000 = ±20%.
+    /// @dev PRICE_BAND in basis points (10000 = 100%).
     uint256 private constant BASIS_POINTS = 10_000;
 
     /// @dev D2: admitted orchestrator cap (incl. frozen), matching f02 MAX_RECIPIENTS.
     uint256 private constant MAX_ORCHESTRATORS = 64;
-    uint256 private constant MAX_PAIRS = 64; // registerPairs batch bound (audit C1: aligns with MAX_ORCHESTRATORS)
-    uint256 private constant MAX_ALLOWLIST = 64; // per-allowlist array bound (audit F2)
+    uint256 private constant MAX_PAIRS = 64; // registerPairs batch bound, aligns with MAX_ORCHESTRATORS
+    uint256 private constant MAX_ALLOWLIST = 64; // per-allowlist array bound
 
-    /// @dev Business-domain upper bound on the quarterly FPV input (audit V1/V2/V3 fix, post-FIPs#1275).
+    /// @dev Business-domain upper bound on the quarterly FPV input.
     ///      With the FIL→USD conversion moved off-chain (FIPs#1275), the FPV input is a single USD total,
-    ///      so the on-chain arithmetic that must not overflow is only _computeShares (V3):
+    ///      so the on-chain arithmetic that must not overflow is only _computeShares:
     ///        - per-orchestrator usd ≤ 1e30 → usd × SHARE_TOTAL(1e18) ≤ 1e48 ≪ 2^256
     ///        - total (≤ MAX_ORCHESTRATORS 64) ≤ 64 × 1e30 = 6.4e31 ≪ 2^256
     ///      Magnitude rationale: the assumed business domain is ~1e6 USD/quarter (§5.5); 1e30 is ~24 orders
@@ -67,7 +67,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     ///      ⚠️ Maintenance: the closure assumes MAX_FPV_USD and MAX_ORCHESTRATORS(64) hold together.
     uint256 private constant MAX_FPV_USD = 1e30; // single USD total per quarter per orchestrator
 
-    // Epoch-typed immutables (review: EPOCHS_PER_QUARTER public — sole source of truth for both the SRA
+    // Epoch-typed immutables (EPOCHS_PER_QUARTER public — sole source of truth for both the SRA
     // and the SWA; SWA reads it via the auto-generated getter instead of duplicating quarter config).
     // All quarter/window/hold values are Epoch-typed (epoch semantics -> Epoch type; POST_PERIOD,
     // VERIFICATION_WINDOW, ACTIVATION_EPOCH follow SRA_CANCEL_HOLD/EPOCHS_PER_QUARTER — no wraps at call sites).
@@ -79,7 +79,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
     // ------------------------------------------------------------------------
     // ERC-7201 storage accessors — layout (structs, slots, assembly getters) lives in
-    // SraStorage.sol (review: separate storage declarations for the #5 proxy refactor);
+    // SraStorage.sol (separate storage declarations for the #5 proxy refactor);
     // these thin wrappers keep the internal call sites unchanged.
     // ------------------------------------------------------------------------
 
@@ -127,7 +127,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     error AlreadyPosted(uint64 q);
     error AlreadySubmitted(uint64 q); // FIP: SubmitShares reverts once a quarter's map is submitted
     error NotLatestQuarter(uint64 q); // FIP-0118 §4.2: an older quarter's shares can never overwrite a newer quarter's
-    error TooManyPairs(); // audit C1: registerPairs batch exceeds MAX_PAIRS
+    error TooManyPairs(); // registerPairs batch exceeds MAX_PAIRS
     error InvalidParameter();
 
     // ------------------------------------------------------------------------
@@ -157,7 +157,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         owner1.addOwner();
         owner2.addOwner();
 
-        // audit E2: deployment-time parameter validation, aligned with setPricingParams (G1)
+        // deployment-time parameter validation, aligned with setPricingParams
         require(priceBand <= BASIS_POINTS, InvalidParameter());
         require(epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0, InvalidParameter());
 
@@ -179,12 +179,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
     function _qEnd(uint64 q) internal view returns (Epoch) {
         // S1C: Q × EPOCHS_PER_QUARTER uses a uint256 intermediate to guard overflow.
         //
-        // Review-② range guard: Epoch narrowed upstream from uint96 to uint64 (f02 consistency,
-        // cherry-picked 8c3eff9). Without the explicit check, an attacker-controlled huge q would
-        // wrap inside Epoch.wrap and could collide into the current quarter window, bypassing the
-        // window checks (enabling forged finalize/shares). The guard rejects end beyond the Epoch
-        // width. At uint64 width, uint64.max × EPOCHS_PER_QUARTER ≥ 2^64 always overflows, so the
-        // guard is the revert path for the MaxQuarter probes (see test/SRAAdversarial.t.sol).
+        // Range guard: without the explicit check, an attacker-controlled huge q would wrap
+        // inside Epoch.wrap and could collide into the current quarter window, bypassing the
+        // window checks (enabling forged shares). The guard rejects end beyond the Epoch
+        // width — at uint64, uint64.max × EPOCHS_PER_QUARTER ≥ 2^64 always overflows, so the
+        // guard is the revert path for the MaxQuarter probes (test/SRAAdversarial.t.sol).
         uint256 end = uint256(Epoch.unwrap(ACTIVATION_EPOCH)) + uint256(q) * uint256(Epoch.unwrap(EPOCHS_PER_QUARTER));
         require(end <= type(uint64).max, InvalidParameter());
         return Epoch.wrap(uint64(end));
@@ -236,11 +235,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // 2.3.1 Orchestrator operations (called by self, no governance)
     // ------------------------------------------------------------------------
 
-    /// @notice An admitted, non-frozen orchestrator declares binding pairs; reverts if the pair is already bound to another (uniqueness, 📄 §3.3).
+    /// @notice An admitted, non-frozen orchestrator declares binding pairs; reverts if the pair is already bound to another (uniqueness, spec §3.3).
     /// @dev C1: parameter uses a named struct Pair[] (inline tuple-array params are illegal in Solidity).
     function registerPairs(Pair[] calldata pairs) external {
-        require(pairs.length <= MAX_PAIRS, TooManyPairs()); // audit C1: batch bound
-        // Review: single storage pointer — avoids hashing the orchestrators mapping twice
+        require(pairs.length <= MAX_PAIRS, TooManyPairs()); // batch bound
+        // single storage pointer — avoids hashing the orchestrators mapping twice
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.OrchestratorInfo storage o = r.orchestrators[msg.sender];
         require(o.admitted, NotAdmitted(msg.sender));
@@ -250,9 +249,9 @@ contract ServiceRewardsActor is UnanimousGovernance {
             bytes32 pairId = _pairId(pairs[i].payer, pairs[i].operator);
             address current = r.bindings[pairId];
             // Uniqueness: if bound and the bound orchestrator (resolved along the alias chain to the current valid one) is still admitted -> reject;
-            // if the bound orchestrator was Removed (admitted=false and no successor) -> treated as unclaimed, claimable (📄 §4.2).
-            // T6: after replace, bindings still point to oldOrch (admitted=false, successor=newOrch);
-            //     must _resolve to newOrch for the check, otherwise a third party could grab the binding pair.
+            // if the bound orchestrator was Removed (admitted=false and no successor) -> treated as unclaimed, claimable (spec §4.2).
+            // After replace, bindings still point to oldOrch (admitted=false, successor=newOrch);
+            // must _resolve to newOrch for the check, otherwise a third party could grab the binding pair.
             if (current != address(0) && _isAdmitted(_resolve(current))) {
                 revert AlreadyBound(pairId);
             }
@@ -263,15 +262,15 @@ contract ServiceRewardsActor is UnanimousGovernance {
     /// @notice During posting, at most one posting per quarter; the value is a single USD total
     ///         (FPV_i(Q): stablecoin face USD + off-chain-converted FIL volume, FIP-0118 FIPs#1275).
     function postVolume(uint64 q, uint256 fpv) external {
-        // Review: single storage pointer — avoids hashing the orchestrators mapping twice
+        // single storage pointer — avoids hashing the orchestrators mapping twice
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.OrchestratorInfo storage o = r.orchestrators[msg.sender];
         require(o.admitted, NotAdmitted(msg.sender));
         require(!o.frozen, NotFrozen(msg.sender));
         require(_inPostingWindow(q), NotInPostingWindow(q));
 
-        // Audit V1/V2/V3 fix (post-FIPs#1275): the single USD total is the only on-chain input that feeds
-        // _computeShares; bound it at the entry so the share arithmetic cannot overflow (see MAX_FPV_USD).
+        // The single USD total is the only on-chain input that feeds _computeShares;
+        // bound it at the entry so the share arithmetic cannot overflow (see MAX_FPV_USD).
         require(fpv <= MAX_FPV_USD, InvalidParameter());
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
@@ -288,12 +287,12 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // 2.3.2 Governance operations (dual Safe + SRA_CANCEL_HOLD, unanimous path)
     // ------------------------------------------------------------------------
 
-    /// @notice Admits an orchestrator; rejects when admitted total >= 64 (🔍 D2).
+    /// @notice Admits an orchestrator; rejects when admitted total >= 64 (D2).
     /// @dev Re-admit = fresh identity (symmetric with remove cleanup): when an old address is re-admitted after replace,
     ///      clears the residual successor alias chain and freeze history — otherwise submitShares's _frozenAtPostEnd
     ///      checks the address itself (not frozen, passes) but _resolve resolves along the residual chain to the frozen
-    ///      successor -> a frozen orchestrator receives a share through the resolve chain (A2 defect, violating S5/S7);
-    ///      residual frozen state would also carry over on re-admission.
+    ///      successor, so a frozen orchestrator would receive a share through the resolve chain; residual frozen state
+    ///      would also carry over on re-admission.
     function admit(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
         require(!r.orchestrators[orch].admitted, AlreadyAdmitted(orch));
@@ -308,7 +307,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit OrchestratorAdmitted(orch);
     }
 
-    /// @notice Permanent removal; releases all bindings (pairs return to unclaimed) (📄 §4.2).
+    /// @notice Permanent removal; releases all bindings (pairs return to unclaimed) (spec §4.2).
     function remove(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
         require(r.orchestrators[orch].admitted, NotAdmitted(orch));
@@ -322,7 +321,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit OrchestratorRemoved(orch);
     }
 
-    /// @notice Freeze: suspends, zeroes shares, excludes FPV (📄 §4.2). Freeze does not release a slot (D2).
+    /// @notice Freeze: suspends, zeroes shares, excludes FPV (spec §4.2). Freeze does not release a slot.
     function freeze(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
         require(r.orchestrators[orch].admitted, NotAdmitted(orch));
@@ -332,7 +331,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit OrchestratorFrozen(orch);
     }
 
-    /// @notice Exact restoration (📄 §4.2).
+    /// @notice Exact restoration (spec §4.2).
     function unfreeze(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
         require(r.orchestrators[orch].admitted, NotAdmitted(orch));
@@ -342,7 +341,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit OrchestratorUnfrozen(orch);
     }
 
-    /// @notice Operator address change (📄 §4.2). Identity (frozen state/freeze history) and all bindings transfer to newOrch.
+    /// @notice Operator address change (spec §4.2). Identity (frozen state/freeze history) and all bindings transfer to newOrch.
     /// @dev bindings store the admitted address; reads resolve along the alias chain to the current valid address (design-gap
     ///      completion: pairIds cannot be enumerated, so bindings do not migrate storage values; an alias indirection layer
     ///      achieves zero-enumeration transfer).
@@ -358,7 +357,6 @@ contract ServiceRewardsActor is UnanimousGovernance {
         r.orchestrators[oldOrch].admitted = false;
         r.orchestrators[oldOrch].successor = newOrch;
 
-        // Replace the element in the enumerable array (admittedCount unchanged)
         for (uint256 i = 0; i < r.admittedList.length; i++) {
             if (r.admittedList[i] == oldOrch) {
                 r.admittedList[i] = newOrch;
@@ -368,7 +366,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit OrchestratorReplaced(oldOrch, newOrch);
     }
 
-    /// @notice Disputed pair reassignment; volume is credited to the new orchestrator from the change epoch onward (📄 §4.2).
+    /// @notice Disputed pair reassignment; volume is credited to the new orchestrator from the change epoch onward (spec §4.2).
     function reassignBinding(address payer, address operator, address orch)
         external
         unanimous(keccak256(msg.data), SRA_CANCEL_HOLD)
@@ -378,7 +376,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit BindingReassigned(payer, operator, orch);
     }
 
-    /// @notice Owner rotation (audit E1): dual-Safe, effective immediately (unanimousNoHold path,
+    /// @notice Owner rotation: dual-Safe, effective immediately (unanimousNoHold path,
     ///         aligned with upstream SWA's replaceOwner). newOwner must be a Safe proxy.
     function replaceOwner(address prevOwner, address newOwner) external unanimousNoHold(keccak256(msg.data)) {
         newOwner.isProbablyASafe();
@@ -386,13 +384,13 @@ contract ServiceRewardsActor is UnanimousGovernance {
         newOwner.addOwner();
     }
 
-    /// @notice Updates the stablecoin + Filecoin Pay allowlists (exclusive update, 📄 §4.2).
-    /// @dev Array parameters require normalization (only same-order calldata yields an identical taskId) — I2 risk covered by tests.
+    /// @notice Updates the stablecoin + Filecoin Pay allowlists (exclusive update, spec §4.2).
+    /// @dev Array parameters require normalization (only same-order calldata yields an identical taskId).
     function setAdmittedLists(address[] calldata stablecoins, address[] calldata filecoinPayContracts)
         external
         unanimous(keccak256(msg.data), SRA_CANCEL_HOLD)
     {
-        require(stablecoins.length <= MAX_ALLOWLIST && filecoinPayContracts.length <= MAX_ALLOWLIST, InvalidParameter()); // audit F2
+        require(stablecoins.length <= MAX_ALLOWLIST && filecoinPayContracts.length <= MAX_ALLOWLIST, InvalidParameter());
         SraStorage.SraStorageLists storage l = _lists();
         // Clear old entries
         for (uint256 i = 0; i < l.stablecoinList.length; i++) {
@@ -415,20 +413,20 @@ contract ServiceRewardsActor is UnanimousGovernance {
         emit AdmittedListsUpdated(stablecoins.length, filecoinPayContracts.length);
     }
 
-    /// @notice Updates the FIL pricing parameters MIN_LOT/PRICE_BAND (📄 §3.3/§5.2).
+    /// @notice Updates the FIL pricing parameters MIN_LOT/PRICE_BAND (spec §3.3/§5.2).
     ///         FIPs#1275: authoritative for the off-chain indexer's conversion, not an on-chain computation.
     function setPricingParams(uint256 minLot, uint256 priceBand)
         external
         unanimous(keccak256(msg.data), SRA_CANCEL_HOLD)
     {
-        require(priceBand <= BASIS_POINTS, InvalidParameter()); // audit B1
+        require(priceBand <= BASIS_POINTS, InvalidParameter());
         SraStorage.SraStorageParams storage p = _params();
         p.minLot = minLot;
         p.priceBand = priceBand;
         emit PricingParamsUpdated(minLot, priceBand);
     }
 
-    /// @notice Either Safe calls _veto alone to discard a queued change (📄 §4.2 + 📘 _veto).
+    /// @notice Either Safe calls _veto alone to discard a queued change (spec §4.2, _veto).
     function cancelPending(bytes32 taskId) external {
         _veto(taskId);
     }
@@ -438,14 +436,14 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // ------------------------------------------------------------------------
 
     /// @notice Only within the verification window, dual-Safe joint; replaces the posted value with the recomputed figure,
-    ///         or supplies the recomputed figure for an unposted orchestrator; exempt from SRA_CANCEL_HOLD (📄 §4.2/§5.3
-    ///         window-is-hold), allows bidirectional correction (🔍 D3a). Value is a single USD total (FIP-0118 FIPs#1275).
+    ///         or supplies the recomputed figure for an unposted orchestrator; exempt from SRA_CANCEL_HOLD (spec §4.2/§5.3
+    ///         window-is-hold), allows bidirectional correction. Value is a single USD total (FIP-0118 FIPs#1275).
     /// @dev The unanimousNoHold modifier handles dual-Safe owner validation; the function body validates the verification window.
     function correctVolume(address orch, uint64 q, uint256 value) external unanimousNoHold(keccak256(msg.data)) {
         require(_inVerificationWindow(q), NotInVerificationWindow(q));
         require(_isAdmitted(orch), NotAdmitted(orch));
 
-        // Audit V1/V2/V3 fix: same business-domain bound as postVolume (governance path into the same FPV storage).
+        // Same business-domain bound as postVolume (governance path into the same FPV storage).
         require(value <= MAX_FPV_USD, InvalidParameter());
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
@@ -460,7 +458,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // 2.3.4 Mechanism operations (permissionless)
     // ------------------------------------------------------------------------
 
-    /// @notice Permissionless after binding; SplitRule over the bound USD values → f02.SetShares(2, map) (📄 §4.2).
+    /// @notice Permissionless after binding; SplitRule over the bound USD values → f02.SetShares(2, map) (spec §4.2).
     ///         Reverts when this quarter's map has already been submitted (FIP-0118 §4.2); an all-zero quarter is a
     ///         benign no-op: SplitRule is not evaluated and the existing share map stands (FIPs#1275, replacing D1 burn).
     function submitShares(uint64 q) external {
@@ -523,7 +521,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     /// @notice Returns the post-binding USD aggregate (FIP-0118 §4.2): Σ of each non-excluded posted orchestrator's
     ///         bound USD value. Pure view — the FIL→USD conversion happens off-chain (FIPs#1275), so there is no
     ///         on-chain finalize to trigger.
-    /// @dev Review: reverts NotBound(q) before binding — distinguishes "quarter not yet bound" (call too early; the SWA
+    /// @dev Reverts NotBound(q) before binding — distinguishes "quarter not yet bound" (call too early; the SWA
     ///      does not need to re-enforce the check) from "quarter with zero declared volume" (legitimately returns 0).
     function aggregatedFPV(uint64 q) external view returns (uint256 usd) {
         require(_afterBinding(q), NotBound(q));
@@ -628,7 +626,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     }
 
     function _pairId(address payer, address operator) internal pure returns (bytes32 result) {
-        // Review: scratch-memory assembly — both addresses fit in the 64-byte scratch space,
+        // Scratch-memory assembly: both addresses fit in the 64-byte scratch space,
         // identical result to keccak256(abi.encode(payer, operator)) without the memory allocation.
         assembly {
             mstore(0, payer)
