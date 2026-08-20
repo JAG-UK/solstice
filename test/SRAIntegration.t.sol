@@ -13,6 +13,7 @@ pragma solidity ^0.8.36;
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {Share} from "../src/lib/FVMRewardTypes.sol";
 import {SRATestBase} from "./SRATestBase.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 
 contract SRAIntegrationTest is SRATestBase {
     uint256 private _salt;
@@ -29,11 +30,11 @@ contract SRAIntegrationTest is SRATestBase {
 
         _rollTo(_qVerifyEnd(0) + 1); // post-binding
 
-        assertEq(sra.aggregatedFPV(0), 900e18, "aggregatedFPV sums the bound USD values");
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 900e18, "aggregatedFPV sums the bound USD values");
 
         // no divergence: submitShares's internal total must == aggregatedFPV (expectEmit captures totalUsd)
         vm.expectEmit(true, false, false, true, address(sra));
-        emit ServiceRewardsActor.SharesSubmitted(0, 2, 900e18);
+        emit ServiceRewardsActor.SharesSubmitted(0, 2, FixedU18.wrap(900e18));
         sra.submitShares(0);
     }
 
@@ -49,7 +50,7 @@ contract SRAIntegrationTest is SRATestBase {
 
         sra.submitShares(0);
 
-        assertEq(sra.aggregatedFPV(0), 900e18, "post-submit aggregated matches final value");
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 900e18, "post-submit aggregated matches final value");
 
         // shares proportional to USD: a:b = 600:300 = 2:1, Σ == 1e18 (largest-remainder tops up the larger remainder a)
         Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
@@ -67,7 +68,7 @@ contract SRAIntegrationTest is SRATestBase {
     function test_Contract_AggregatedFPV_PureView() public {
         _admitAndPost(100e18);
         _rollTo(_qVerifyEnd(0) + 1); // post-binding
-        assertEq(sra.aggregatedFPV(0), 100e18, "view equals the bound value");
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18, "view equals the bound value");
     }
 
     // ------------------------------------------------------------------------

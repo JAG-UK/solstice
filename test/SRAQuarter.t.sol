@@ -14,6 +14,7 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {FPV} from "../src/lib/SraTypes.sol";
 
@@ -30,7 +31,7 @@ contract SRAQuarterTest is SRATestBase {
         vm.roll(_qEnd(0) + 1); // E+1
         _postAs(orch, 0, _fpv(100e18));
         FPV memory f = sra.fpvOf(0, orch);
-        assertEq(f.usd, 100e18);
+        assertEq(FixedU18.unwrap(f.usd), 100e18);
     }
 
     /// Strategy 2: E itself is not in the posting window (E < now, strictly less).
@@ -41,7 +42,7 @@ contract SRAQuarterTest is SRATestBase {
         vm.roll(_qEnd(0)); // now == E: posting not yet open
         vm.prank(orch);
         vm.expectRevert();
-        sra.postVolume(0, _fpv(100e18));
+        sra.postVolume(0, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// Strategy 2: the posting window's right boundary is inclusive of E+POST (<=).
@@ -51,7 +52,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qPostEnd(0)); // now == E+POST: allowed
         _postAs(orch, 0, _fpv(100e18));
-        assertEq(sra.fpvOf(0, orch).usd, 100e18);
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 100e18);
     }
 
     /// Strategy 2: E+POST+1 enters verification; posting is rejected.
@@ -62,7 +63,7 @@ contract SRAQuarterTest is SRATestBase {
         vm.roll(_qPostEnd(0) + 1);
         vm.prank(orch);
         vm.expectRevert();
-        sra.postVolume(0, _fpv(100e18));
+        sra.postVolume(0, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// Strategy 2: at most once per quarter — the second posting reverts (posted flag).
@@ -75,7 +76,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.prank(orch);
         vm.expectRevert();
-        sra.postVolume(0, _fpv(200e18));
+        sra.postVolume(0, FixedU18.wrap(_fpv(200e18)));
     }
 
     // ------------------------------------------------------------------------
@@ -92,7 +93,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qPostEnd(0) + 1); // verification window
         _correctVolume(orch, 0, _fpv(250e18));
-        assertEq(sra.fpvOf(0, orch).usd, 250e18);
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 250e18);
     }
 
     /// Strategy 7: bidirectional correction — downward succeeds.
@@ -105,7 +106,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qPostEnd(0) + 1);
         _correctVolume(orch, 0, _fpv(40e18));
-        assertEq(sra.fpvOf(0, orch).usd, 40e18);
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 40e18);
     }
 
     /// Strategy 7: multiple corrections within the window; the last one wins (whole replacement).
@@ -119,7 +120,7 @@ contract SRAQuarterTest is SRATestBase {
         vm.roll(_qPostEnd(0) + 1);
         _correctVolume(orch, 0, _fpv(200e18));
         _correctVolume(orch, 0, _fpv(300e18));
-        assertEq(sra.fpvOf(0, orch).usd, 300e18);
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 300e18);
     }
 
     /// Strategy 7: an unposted orchestrator can be backfilled within the verification window (posted=false -> written).
@@ -129,7 +130,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qPostEnd(0) + 1); // unposted, straight into verification
         _correctVolume(orch, 0, _fpv(150e18));
-        assertEq(sra.fpvOf(0, orch).usd, 150e18);
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 150e18);
         assertTrue(sra.fpvOf(0, orch).posted);
     }
 
@@ -143,7 +144,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qVerifyEnd(0)); // now == E+POST+VERIFY: allowed
         _correctVolume(orch, 0, _fpv(200e18));
-        assertEq(sra.fpvOf(0, orch).usd, 200e18);
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 200e18);
     }
 
     /// Strategy 7: after the window closes (E+POST+VERIFY+1) CorrectVolume is rejected (value bound).
@@ -156,10 +157,10 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qVerifyEnd(0) + 1); // post-binding
         vm.prank(owner1);
-        sra.correctVolume(orch, 0, _fpv(200e18));
+        sra.correctVolume(orch, 0, FixedU18.wrap(_fpv(200e18)));
         vm.prank(owner2);
         vm.expectRevert(); // window closed
-        sra.correctVolume(orch, 0, _fpv(200e18));
+        sra.correctVolume(orch, 0, FixedU18.wrap(_fpv(200e18)));
     }
 
     // ------------------------------------------------------------------------
@@ -193,7 +194,7 @@ contract SRAQuarterTest is SRATestBase {
         _postAs(orchB, 0, _fpv(250e18));
 
         vm.roll(_qVerifyEnd(0) + 1);
-        assertEq(sra.aggregatedFPV(0), 350e18);
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 350e18);
     }
 
     /// Strategy 11: a frozen orchestrator's (frozen at the E+POST instant) FPV is excluded from the aggregate.
@@ -212,7 +213,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qVerifyEnd(0) + 1);
         // B excluded: the aggregate contains only A
-        assertEq(sra.aggregatedFPV(0), 100e18);
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18);
     }
 
     /// Strategy 11/CV7: some orchestrators did not post -> aggregatedFPV skips them (!posted continue).
@@ -227,7 +228,7 @@ contract SRAQuarterTest is SRATestBase {
 
         vm.roll(_qVerifyEnd(0) + 1); // post-binding
         // B unposted (posted=false) -> skipped; only A aggregated
-        assertEq(sra.aggregatedFPV(0), 100e18);
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18);
     }
 
     // ------------------------------------------------------------------------
@@ -279,7 +280,7 @@ contract SRAQuarterTest is SRATestBase {
         vm.roll(_qEnd(0) + 1); // posting window
         vm.prank(stranger);
         vm.expectRevert(); // NotAdmitted(stranger)
-        sra.postVolume(0, _fpv(100e18));
+        sra.postVolume(0, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// Strategy 7: correctVolume's target not admitted -> NotAdmitted revert at the second vote's body execution.
@@ -287,9 +288,9 @@ contract SRAQuarterTest is SRATestBase {
         address stranger = makeAddr("stranger");
         vm.roll(_qPostEnd(0) + 1); // verification window
         vm.prank(owner1);
-        sra.correctVolume(stranger, 0, 100e18); // first vote approve
+        sra.correctVolume(stranger, 0, FixedU18.wrap(100e18)); // first vote approve
         vm.prank(owner2);
         vm.expectRevert(); // second vote executes the body -> NotAdmitted(stranger)
-        sra.correctVolume(stranger, 0, 100e18);
+        sra.correctVolume(stranger, 0, FixedU18.wrap(100e18));
     }
 }

@@ -27,6 +27,7 @@ import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {Pair} from "../src/lib/SraTypes.sol";
 import {IsASafe} from "../src/lib/IsASafe.sol";
 import {SRATestBase} from "./SRATestBase.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 
 contract SRAAdversarial is SRATestBase {
     // ------------------------------------------------------------------------
@@ -41,7 +42,7 @@ contract SRAAdversarial is SRATestBase {
         vm.roll(_qEnd(0) + 1); // inside Q0's posting window
         vm.prank(orch);
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotInPostingWindow.selector, uint64(10)));
-        sra.postVolume(10, _fpv(100e18));
+        sra.postVolume(10, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// q = uint64.max: with Epoch now uint64 (cherry-picked 8c3eff9), uint64.max × 1000 ≈ 2^83 > 2^64,
@@ -55,7 +56,7 @@ contract SRAAdversarial is SRATestBase {
         vm.roll(_qEnd(0) + 1);
         vm.prank(orch);
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.postVolume(type(uint64).max, _fpv(100e18));
+        sra.postVolume(type(uint64).max, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// correctVolume on a future quarter: verification window not open -> NotInVerificationWindow(q)
@@ -66,10 +67,10 @@ contract SRAAdversarial is SRATestBase {
 
         vm.roll(_qVerifyEnd(0)); // inside Q0's verification window
         vm.prank(owner1);
-        sra.correctVolume(orch, 10, _fpv(100e18));
+        sra.correctVolume(orch, 10, FixedU18.wrap(_fpv(100e18)));
         vm.prank(owner2);
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.NotInVerificationWindow.selector, uint64(10)));
-        sra.correctVolume(orch, 10, _fpv(100e18));
+        sra.correctVolume(orch, 10, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// q = uint64.max on correctVolume -> _qEnd range guard fires (uint64 width) -> InvalidParameter.
@@ -79,10 +80,10 @@ contract SRAAdversarial is SRATestBase {
 
         vm.roll(_qVerifyEnd(0));
         vm.prank(owner1);
-        sra.correctVolume(orch, type(uint64).max, _fpv(100e18));
+        sra.correctVolume(orch, type(uint64).max, FixedU18.wrap(_fpv(100e18)));
         vm.prank(owner2);
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.correctVolume(orch, type(uint64).max, _fpv(100e18));
+        sra.correctVolume(orch, type(uint64).max, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// aggregatedFPV on a future quarter (before its binding) -> NotBound(q).
@@ -136,7 +137,7 @@ contract SRAAdversarial is SRATestBase {
 
         vm.roll(_qEnd(0) + 1);
         _postAs(orch, 0, _fpv(1e30));
-        assertEq(sra.fpvOf(0, orch).usd, 1e30);
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 1e30);
     }
 
     /// usd == MAX_FPV_USD + 1 is rejected with InvalidParameter.
@@ -147,7 +148,7 @@ contract SRAAdversarial is SRATestBase {
         vm.roll(_qEnd(0) + 1);
         vm.prank(orch);
         vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.postVolume(0, _fpv(1e30 + 1));
+        sra.postVolume(0, FixedU18.wrap(_fpv(1e30 + 1)));
     }
 
     // ------------------------------------------------------------------------

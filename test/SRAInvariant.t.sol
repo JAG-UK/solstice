@@ -30,6 +30,7 @@ pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {Pair} from "../src/lib/SraTypes.sol";
 import {SRATestBase} from "./SRATestBase.sol";
@@ -256,7 +257,7 @@ contract SRAInvariantHandler is SRATestBase {
         uint256 stableUsd = bound(usd, 1, 1e30);
         vm.roll(_qEnd(qq) + 1 + uint64(bound(usd, 0, POST_PERIOD - 1)));
         vm.prank(orch);
-        sra.postVolume(qq, _fpv(stableUsd));
+        sra.postVolume(qq, FixedU18.wrap(_fpv(stableUsd)));
         _posted[qq][orch] = true;
     }
 
@@ -269,9 +270,9 @@ contract SRAInvariantHandler is SRATestBase {
         uint256 stableUsd = bound(usd, 1, 1e30);
         vm.roll(_qPostEnd(qq) + 1 + uint64(bound(usd, 0, VERIFICATION_WINDOW - 1)));
         vm.prank(owner1);
-        sra.correctVolume(orch, qq, stableUsd);
+        sra.correctVolume(orch, qq, FixedU18.wrap(stableUsd));
         vm.prank(owner2);
-        sra.correctVolume(orch, qq, stableUsd);
+        sra.correctVolume(orch, qq, FixedU18.wrap(stableUsd));
         _posted[qq][orch] = true;
     }
 
@@ -484,7 +485,7 @@ contract SRAInvariantHandler is SRATestBase {
             address orch = _orchPool[i];
             if (!sra.isAdmitted(orch)) continue;
             if (_isFrozenAtHandled(orch, postEnd)) continue;
-            if (sra.fpvOf(qq, orch).usd > 0) {
+            if (FixedU18.unwrap(sra.fpvOf(qq, orch).usd) > 0) {
                 // non-zero total exists -> record the full snapshot
                 delete _lastFrozenWallets;
                 _lastTotal = 0;
@@ -498,7 +499,7 @@ contract SRAInvariantHandler is SRATestBase {
                         _lastFrozenWallets.push(o);
                         continue;
                     }
-                    uint256 usd = sra.fpvOf(qq, o).usd; // bound USD value — same field submitShares reads (FIPs#1275)
+                    uint256 usd = FixedU18.unwrap(sra.fpvOf(qq, o).usd); // bound USD value — same field submitShares reads (FIPs#1275)
                     if (usd > 0) {
                         _lastTotal += usd;
                         _lastActiveCount++;

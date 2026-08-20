@@ -13,6 +13,7 @@ pragma solidity ^0.8.36;
 
 import {ServiceRewardsActor, Share} from "../../src/ServiceRewardsActor.sol";
 import {SRATestBase} from "../SRATestBase.sol";
+import {FixedU18} from "../../src/lib/FixedU18.sol";
 import {DifferentialCases} from "./DifferentialCases.sol";
 import {DifferentialSharesHarness} from "./DifferentialSharesHarness.sol";
 
@@ -56,6 +57,19 @@ contract DifferentialSharesTest is SRATestBase {
         }
     }
 
+    /// @dev Boundary: total == 0 must not silently produce a wrong allocation. In production
+    ///      submitShares guards total == 0 with an early return (no-op); calling _computeShares
+    ///      directly with total == 0 hits the FixedU18 remainder `% totalUsd` → division-by-zero
+    ///      Panic(0x12) — a safe failure (no silent wrong values). Locks the behavior boundary.
+    function test_Diff_Share_TotalZero_Reverts() public {
+        address[] memory wallets = new address[](1);
+        wallets[0] = address(0x1);
+        uint256[] memory usds = new uint256[](1);
+        usds[0] = 100e18;
+        vm.expectRevert(); // Panic(0x12): remainder % totalUsd with totalUsd == 0
+        harness.computeShares(wallets, usds, 1, 0);
+    }
+
     // ------------------------------------------------------------------------
     // 2. FPV aggregation (FIPs#1275: single USD total — the aggregate is a plain sum;
     //    hand-written cases exercise the contract's sum + frozen exclusion)
@@ -68,10 +82,10 @@ contract DifferentialSharesTest is SRATestBase {
         _admitOn(s, a);
         vm.roll(_qEnd(0) + 1);
         vm.prank(a);
-        s.postVolume(0, 350e18);
+        s.postVolume(0, FixedU18.wrap(350e18));
 
         _rollTo(_qVerifyEnd(0) + 1); // post-binding
-        assertEq(s.aggregatedFPV(0), 350e18);
+        assertEq(FixedU18.unwrap(s.aggregatedFPV(0)), 350e18);
     }
 
     /// Multiple orchestrators: aggregatedFPV == Σ posted USD totals.
@@ -84,12 +98,12 @@ contract DifferentialSharesTest is SRATestBase {
             vm.roll(_qEnd(0) + 1);
             uint256 usd = 100e18 * (k + 1);
             vm.prank(orch);
-            s.postVolume(0, usd);
+            s.postVolume(0, FixedU18.wrap(usd));
             expected += usd;
         }
 
         _rollTo(_qVerifyEnd(0) + 1);
-        assertEq(s.aggregatedFPV(0), expected);
+        assertEq(FixedU18.unwrap(s.aggregatedFPV(0)), expected);
     }
 
     /// Frozen orchestrator excluded from the aggregate.
@@ -101,9 +115,9 @@ contract DifferentialSharesTest is SRATestBase {
         _admitOn(s, b);
         vm.roll(_qEnd(0) + 1);
         vm.prank(a);
-        s.postVolume(0, 100e18);
+        s.postVolume(0, FixedU18.wrap(100e18));
         vm.prank(b);
-        s.postVolume(0, 250e18);
+        s.postVolume(0, FixedU18.wrap(250e18));
 
         // freeze b during posting
         vm.prank(owner1);
@@ -114,7 +128,7 @@ contract DifferentialSharesTest is SRATestBase {
         s.freeze(b);
 
         _rollTo(_qVerifyEnd(0) + 1);
-        assertEq(s.aggregatedFPV(0), 100e18); // b excluded
+        assertEq(FixedU18.unwrap(s.aggregatedFPV(0)), 100e18); // b excluded
     }
 
     // ------------------------------------------------------------------------

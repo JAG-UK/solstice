@@ -25,6 +25,7 @@ pragma solidity ^0.8.36;
 
 import {Share} from "../src/lib/FVMRewardTypes.sol";
 import {SRATestBase} from "./SRATestBase.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 
 contract SRAOverflowDoS is SRATestBase {
     uint256 private constant EXTREME = type(uint256).max; // V3: poison USD total
@@ -43,10 +44,10 @@ contract SRAOverflowDoS is SRATestBase {
 
         vm.roll(_qEnd(0) + 1);
         vm.prank(attacker);
-        try sra.postVolume(0, EXTREME) {} catch {}
+        try sra.postVolume(0, FixedU18.wrap(EXTREME)) {} catch {}
 
         vm.prank(victim);
-        sra.postVolume(0, 100e18);
+        sra.postVolume(0, FixedU18.wrap(100e18));
 
         vm.roll(_qVerifyEnd(0) + 1);
         sra.submitShares(0); // must not overflow
@@ -64,7 +65,7 @@ contract SRAOverflowDoS is SRATestBase {
         vm.roll(_qEnd(0) + 1);
         vm.prank(attacker);
         vm.expectRevert();
-        sra.postVolume(0, EXTREME);
+        sra.postVolume(0, FixedU18.wrap(EXTREME));
     }
 
     // ------------------------------------------------------------------------

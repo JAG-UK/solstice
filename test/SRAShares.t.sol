@@ -14,6 +14,7 @@ import {FVMRewards} from "../src/lib/FVMRewards.sol";
 import {USR_FORBIDDEN} from "fvm-solidity/FVMErrors.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {SRATestBase} from "./SRATestBase.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 
 contract SRASharesTest is SRATestBase {
     // T5 fix: _admitAndPost originally used block.number as the makeAddr salt, but _admit's
@@ -242,7 +243,7 @@ contract SRASharesTest is SRATestBase {
         // orchestrator a posts a single USD total (off-chain conversion folded the FIL contribution in)
         vm.roll(_qEnd(0) + 1);
         vm.prank(a);
-        sra.postVolume(0, 1000e18); // = 500e18 stable + 500e18 converted FIL
+        sra.postVolume(0, FixedU18.wrap(1000e18)); // = 500e18 stable + 500e18 converted FIL
 
         // orchestrator b pure stablecoin 500e18 -> a:b = 2:1
         address b = _admitAndPost(500e18);

@@ -11,6 +11,7 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {Pair, FPV} from "../src/lib/SraTypes.sol";
 
@@ -208,7 +209,7 @@ contract SRARegistryTest is SRATestBase {
         vm.roll(_qEnd(0) + 1); // posting period
         vm.prank(orch);
         vm.expectRevert();
-        sra.postVolume(0, _fpv(100e18));
+        sra.postVolume(0, FixedU18.wrap(_fpv(100e18)));
     }
 
     /// Strategy 3: unfreeze restores operation capability (registerPairs / postVolume).
@@ -230,7 +231,7 @@ contract SRARegistryTest is SRATestBase {
         vm.roll(_qEnd(0) + 1);
         _postAs(orch, 0, _fpv(100e18)); // can post after restore
         FPV memory f = sra.fpvOf(0, orch);
-        assertEq(f.usd, 100e18);
+        assertEq(FixedU18.unwrap(f.usd), 100e18);
     }
 
     // ------------------------------------------------------------------------
@@ -528,6 +529,6 @@ contract SRARegistryTest is SRATestBase {
         vm.roll(_qEnd(1) + 1); // quarter 1 posting window
         _postAs(oldOrch, 1, _fpv(100e18)); // not reverting proves normal operation
         FPV memory f = sra.fpvOf(1, oldOrch);
-        assertEq(f.usd, 100e18);
+        assertEq(FixedU18.unwrap(f.usd), 100e18);
     }
 }

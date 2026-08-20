@@ -67,7 +67,7 @@ Used throughout this document:
 | Method | Signature | One-line semantics |
 |--------|-----------|--------------------|
 | `registerPairs` | `registerPairs(Pair[] calldata pairs)` — named struct `Pair {address payer; address operator;}` (C1: inline tuple-array params are illegal in Solidity) | An admitted, non-frozen orchestrator declares binding pairs; reverts if the pair is already bound to another orchestrator (uniqueness, 📄 §3.3) |
-| `postVolume` | `postVolume(uint64 Q, uint256 fpv)` | During posting; at most one posting per quarter; the value is a single USD-denominated total (FPV_i(Q): stablecoin face USD + off-chain-converted FIL volume, FIPs#1275), bounded by MAX_FPV_USD |
+| `postVolume` | `postVolume(uint64 Q, FixedU18 fpv)` | During posting; at most one posting per quarter; the value is a single USD-denominated total (FPV_i(Q): stablecoin face USD + off-chain-converted FIL volume, FIPs#1275), bounded by MAX_FPV_USD; 18-decimal fixed point (1 USD = 1e18), type-checked from the entry |
 
 #### 2.3.2 Governance operations (dual Safe + SRA_CANCEL_HOLD, unanimous path)
 
@@ -90,7 +90,7 @@ Used throughout this document:
 
 | Method | Signature | One-line semantics |
 |--------|-----------|--------------------|
-| `correctVolume` | `correctVolume(address orch, uint64 Q, uint256 value)` | Only within the verification window, dual-Safe joint; replaces the posted value with the recomputed figure or backfills for an unposted orchestrator; exempt from SRA_CANCEL_HOLD, allows bidirectional correction (📄 §4.2/§5.3 + 🔍 D3a) |
+| `correctVolume` | `correctVolume(address orch, uint64 Q, FixedU18 value)` | Only within the verification window, dual-Safe joint; replaces the posted value with the recomputed figure or backfills for an unposted orchestrator; exempt from SRA_CANCEL_HOLD, allows bidirectional correction (📄 §4.2/§5.3 + 🔍 D3a) |
 
 > `value` is a single USD-denominated total (same shape as PostVolume; the FIL→USD conversion happens off-chain, FIPs#1275) — **✏️ design derivation** (the spec writes "value" without defining the structure).
 
@@ -104,7 +104,7 @@ Used throughout this document:
 
 | Method | Signature | One-line semantics |
 |--------|-----------|--------------------|
-| `aggregatedFPV` | `aggregatedFPV(uint64 Q) returns (uint256 usd)` | Returns the post-binding USD aggregate: Σ of each non-excluded posted orchestrator's bound USD value. **Pure view** — the FIL→USD conversion is off-chain (FIPs#1275), so there is no on-chain finalize to trigger (📄 §3.2/§4.2) |
+| `aggregatedFPV` | `aggregatedFPV(uint64 Q) returns (FixedU18 usd)` | Returns the post-binding USD aggregate (18-decimal fixed point, matching the SWA interface `IServiceRewardsActor`): Σ of each non-excluded posted orchestrator's bound USD value. **Pure view** — the FIL→USD conversion is off-chain (FIPs#1275), so there is no on-chain finalize to trigger (📄 §3.2/§4.2) |
 
 > **Contract declaration (FIPs#1275)**: `AggregatedFPV` reads only bound USD values — the spec's "reading AggregatedFPV triggers FinalizeConversion" clause was removed with the off-chain conversion. Reverts `NotBound(q)` before binding — distinguishing "quarter not yet bound" (call too early; the SWA does not need to re-enforce the check) from "quarter with zero declared volume" (legitimately returns 0). Locked by `test/SRAIntegration.t.sol` (§4.3.6, scenarios C1-C3).
 
@@ -150,11 +150,13 @@ struct SRAStorageLists {
 
 ```solidity
 struct FPV {
-    uint128 usd;    // single USD-denominated total for the quarter (FPV_i(Q)); FIL contribution
+    FixedU18 usd;   // single USD-denominated total for the quarter (FPV_i(Q)); FIL contribution
                     // folded in off-chain by the orchestrator's indexer (FIPs#1275).
-                    // uint128 packs with `posted` into one storage slot (2 -> 1); MAX_FPV_USD(1e30)
-                    // < uint128.max, and the ABI encoding is unchanged (32-byte right-aligned).
-                    // External write signatures stay uint256 — narrowing happens at the storage write.
+                    // 18-decimal fixed point (1 USD = 1e18) — adopted per the SWA interface
+                    // (IServiceRewardsActor.aggregatedFPV returns FixedU18) so every USD-consuming
+                    // computation is type-safe against integer/fixed-point magnitude mixing.
+                    // Two storage slots (packing trade-off accepted; ~2.5% of quarterly gas).
+                    // MAX_FPV_USD(1e30) wraps as 1e48 < uint256.max — no narrowing at the write.
     bool posted;    // posted flag (at most once per quarter)
 }
 struct SRAStorageQuarter {
@@ -233,7 +235,7 @@ submitShares(Q):
 - `fpv ≤ MAX_FPV_USD` (business-domain bound, audit V3 fix — the single on-chain input that feeds `_computeShares`)
 - The pricing rule is fixed and public; every input it consumes (settlements, fee-auction claims) is an on-chain event, so the total remains deterministically recomputable by any observer — a misreport (a wrong FIL→USD conversion included) is detectable by SRA Governance during the verification window and correctable via `CorrectVolume` (📄 §2.2).
 
-**On-chain arithmetic**: `_computeShares` is the only place USD values multiply (`usd × SHARE_TOTAL / total`); with `usd ≤ 1e30` and ≤ 64 orchestrators, no overflow is possible (§5.5).
+**On-chain arithmetic**: `_computeShares` is the only place USD values multiply — FixedU18 fixed-point (`usd * ONE / total`, 18-decimal; mathematically identical to the integer form `usd × 1e18 / total_int`); with `usd ≤ 1e30` and ≤ 64 orchestrators, no overflow is possible (§5.5).
 
 #### 2.5.5 Governance Integration (📘 UnanimousGovernance mechanism + ✏️ method pairing)
 
@@ -299,7 +301,7 @@ submitShares(Q):
 
 #### S1 Method Signatures (✅ approved)
 
-- **Decision**: Solidity types for all 14 writes + 1 read (12 core writes + 1 auxiliary write: cancelPending governance veto; + 1 audit-added governance write: replaceOwner owner rotation, E1). Sub-decisions: A. `setPricingParams` as an independent method (not merged into setAdmittedLists; parameter domains separate); B. `postVolume`/`correctVolume` take a single USD-denominated total `uint256` (FIPs#1275: the FIL→USD conversion is off-chain, so the FPV has no per-component structure to correct); C. `Q` as uint64 (sufficient quantization headroom; `Q × EPOCHS_PER_QUARTER` uses a uint256 intermediate to guard overflow).
+- **Decision**: Solidity types for all 14 writes + 1 read (12 core writes + 1 auxiliary write: cancelPending governance veto; + 1 audit-added governance write: replaceOwner owner rotation, E1). Sub-decisions: A. `setPricingParams` as an independent method (not merged into setAdmittedLists; parameter domains separate); B. `postVolume`/`correctVolume` take a single USD-denominated total `FixedU18` (FIPs#1275: the FIL→USD conversion is off-chain, so the FPV has no per-component structure to correct; 18-decimal fixed point aligns with the SWA interface and type-checks against integer/fixed-point mixing); C. `Q` as uint64 (sufficient quantization headroom; `Q × EPOCHS_PER_QUARTER` uses a uint256 intermediate to guard overflow).
 - **Rationale**: the spec gives only method names and prose; signatures are design derivations; parameter-domain separation lowers governance coupling; the full FPV structure supports correction scenarios.
 - **Impact**: method set and ABI finalized; C1 later adjusts `registerPairs` to a named struct (Solidity compile limitation); C8 environment issue resolved via the forge upgrade.
 
@@ -614,7 +616,7 @@ For fresh addresses admit is unaffected (fields are already empty); rejected opt
 
 **4/4 PASS**. The original proposition set T1 (full coverage + mutual exclusion) / T5 (interval search vs mathematical definition) / T6 (pairwise mutual exclusion) was **downgraded due to halmos 0.1.13 tool limits** (probe experiments confirmed): ① immutables become symbolic after skipping the constructor (window constants have no concrete values) → absolute boundary membership cannot be verified; ② `vm.warp` does not work on symbolic parameters (block.number cannot be symbolized) → universal verification of completeness relying on `currentEpoch()` is infeasible; ③ storage array element reads after push are wrong (length correct but elements symbolic) → freeze-interval search cannot be verified with storage-preset data. The downgraded propositions are covered by dynamic tests: window boundary ±1 on both sides 8 cases (SRAQuarter.t.sol), freeze/unfreeze in both directions + invariant A2 random freeze-history exclusion, 100% line coverage with no unexecuted paths — blind spot 4 is substantially closed within the tool's capability.
 
-> **Evidence conditions (S3 annotation)** — the symbolic domain here is the **weak form** "arbitrary window config (immutables symbolized) + q small-domain enumeration + block.number = 0" (tool limits ①/②); it is **not** a universal-domain proof. The strong boundary semantics (now = E / E+1 / E+P / E+P+1 / E+P+V / E+P+V+1) are covered by the dynamic ±1 test set. The `_computeShares` Halmos proof (t8) additionally uses a symbolic usd domain of MAX_USD = 1e3 — a **proportional-space** sample (shares depend only on usd ratios, invariant under scaling); the enforced absolute domain (MAX_FPV_USD = 1e30) is covered independently by the §5.5 domain-math bounds (per-orch usd × 1e18 ≤ 1e48 / total ≤ 6.4e31 ≪ 2^256), whose premise is now enforced in code (the single `MAX_FPV_USD` bound at both input entries).
+> **Evidence conditions (S3 annotation)** — the symbolic domain here is the **weak form** "arbitrary window config (immutables symbolized) + q small-domain enumeration + block.number = 0" (tool limits ①/②); it is **not** a universal-domain proof. The strong boundary semantics (now = E / E+1 / E+P / E+P+1 / E+P+V / E+P+V+1) are covered by the dynamic ±1 test set. The `_computeShares` largest-remainder Halmos checks were **removed** (FixedU18 assembly ops not symbolizable — see §5.10); the algorithm properties are covered by the differential suite (bit-exact fixed cases) and invariant fuzz (SumShares conservation). The enforced absolute domain (MAX_FPV_USD = 1e30) is covered independently by the §5.5 domain-math bounds (per-orch usd × 1e18 ≤ 1e48 / total ≤ 6.4e31 ≪ 2^256), whose premise is now enforced in code (the single `MAX_FPV_USD` bound at both input entries).
 
 #### 4.3.9 Spec-Conformance Alignment Registry (deviation A/B/D unified implementation, 103 → 109 tests)
 
@@ -630,7 +632,7 @@ For fresh addresses admit is unaffected (fields are already empty); rejected opt
 > A second review of PR #24 (post-squash) probed three overflow-DoS findings (**V1 anchor pollution / V2 finalizeConversion overflow / V3 _computeShares overflow**) — all confirmed real: `postVolume`/`correctVolume` had **no business-domain upper bounds**, so the §5.5 "Integer overflow ✅ Safe" conclusion rested on an **unenforced "business domain ~1e6" assumption** (a QA-system gap: no adversarial-input layer, hypothesis-driven claims, broken evidence conditions, single threat model). The user arranged the V1/V2/V3 fix; the backlog (B1/C1/E1/E2/F2) completed in this pass.
 
 **V1/V2/V3 — input-domain bounds enforced** (fix commits `29293da` test + `ddbace4` fix):
-- **V3 (current)**: the single `MAX_FPV_USD(1e30)` bound at both input entries (postVolume + correctVolume) closes the `_computeShares` chain (per-orch usd × 1e18 ≤ 1e48 / total ≤ 6.4e31 ≪ 2^256). *(V1 anchor pollution / V2 finalize overflow were removed with the band/finalize machinery, FIPs#1275.)*
+- **V3 (current)**: the single `MAX_FPV_USD` bound at both input entries (postVolume + correctVolume) closes the `_computeShares` chain (per-orch `usd_f × 1e18 ≤ 1e48` / total ≤ 6.4e31 ≪ 2^256 — the intermediate holds identically under the FixedU18 representation since the unwrap value domain is unchanged). **Note**: `MAX_FPV_USD = FixedU18.wrap(1e30)` is 18-decimal → **1e12 USD** per quarter per orchestrator (the pre-FixedU18 1e30 was integer USD); the business domain ~1e6 USD still has ~6 orders of magnitude headroom, and the chain closes with ~29 orders to spare (1e48 → 2^256 ≈ 1.16e77). *(V1 anchor pollution / V2 finalize overflow were removed with the band/finalize machinery, FIPs#1275.)*
 - Tests: `test/SRAOverflowDoS.t.sol` (6): V1 anchor-pollution permanent-DoS / V2 finalize-overflow DoS / V3 computeShares-overflow DoS (each Panic(0x11) precise + post-fix "system stays usable" control), plus claimFil==0 / correctVolume-entry / anchor-refusal cases
 
 **B1/C1/E1/E2/F2 — remaining bounds + owner rotation (this pass, 8 tests)**:
@@ -657,7 +659,7 @@ Final: SRA deterministic **118/118 Green** (SRAQuarter 44 + SRARegistry 28 + SRA
 
 **S2 — security-claim → code-enforcement map** (§5.1 table): every "Safe"/"Conditionally safe" conclusion now cites the enforcing code point (require / mechanism); a claim without an enforcement reference fails review. Maps all 8 categories (e.g. Integer overflow → the single `MAX_FPV_USD` bound @ postVolume + correctVolume; DoS caps → `MAX_PAIRS(64)` / `MAX_ALLOWLIST(64)` / `MAX_ORCHESTRATORS(64)`).
 
-**S3 — evidence-application-condition annotation**: the fuzz sampling domain `(0,1e30)` is re-annotated as **equal to the code-enforced MAX_FPV_USD** (not a test-side shrink — `SRAShares:369` + `SRAInvariant:255,268`); the Halmos `MAX_USD=1e3` symbolic domain is annotated as a **proportional-space** proof with the enforced absolute domain's arithmetic safety independently covered by the §5.5 domain-math bounds (docs §4.3.8 S3 note).
+**S3 — evidence-application-condition annotation**: the fuzz sampling domain `(0,1e30)` is re-annotated as **equal to the code-enforced MAX_FPV_USD** (not a test-side shrink — `SRAShares:369` + `SRAInvariant:255,268`); the largest-remainder algorithm properties are covered by the differential suite (bit-exact fixed cases) + invariant fuzz, with the enforced absolute domain's arithmetic safety independently covered by the §5.5 domain-math bounds (docs §4.3.8 S3 note).
 
 **S4 — threat model matrix** (§5.13): all 15 external write functions × (malicious orchestrator / compromised owner) → impact → mitigation → sufficiency; every function is closed either by unanimous dual-Safe governance or by code-enforced input bounds + timing gates.
 

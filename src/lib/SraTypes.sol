@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
+import {FixedU18} from "./FixedU18.sol";
+
 // ----------------------------------------------------------------------------
 // Top-level SRA types (test files import from this file: Pair / FPV)
 // ----------------------------------------------------------------------------
@@ -16,10 +18,12 @@ struct Pair {
 /// @notice Quarterly FPV: a single USD-denominated total (FIP-0118 §2.3, FIPs#1275: FIL→USD conversion moved
 ///         off-chain, so the SRA no longer stores pricing periods). `usd` is the face-USD stablecoin volume plus
 ///         the off-chain-converted FIL volume; `posted` is the at-most-once-per-quarter flag.
-/// @dev uint128: storage-packing optimization — MAX_FPV_USD(1e30) < uint128.max(3.4e38), so `usd` packs with
-///      `posted` into one storage slot (2 -> 1). ABI unchanged (static 32-byte right-aligned encoding is
-///      identical for uint128/uint256); spec defines only "single USD total" semantics, no width.
+/// @dev FixedU18: 18-decimal fixed-point USD (1 USD = 1e18 integer). Adopted per the SWA interface
+///      (IServiceRewardsActor.aggregatedFPV returns FixedU18) so every USD-consuming computation is
+///      type-safe against integer/fixed-point mixing (1 vs 1e18 magnitude errors). MAX_FPV_USD(1e30)
+///      wraps as 1e48 < uint256.max — no narrowing at the storage write. Two storage slots (packing
+///      trade-off accepted; ~2.5% of quarterly gas).
 struct FPV {
-    uint128 usd; // single USD total for the quarter (FPV_i(Q))
+    FixedU18 usd; // single USD total for the quarter (FPV_i(Q)), 18-decimal fixed point
     bool posted; // posted flag (at most once per quarter)
 }

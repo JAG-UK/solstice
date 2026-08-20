@@ -2,6 +2,7 @@
 pragma solidity ^0.8.36;
 
 import {ServiceRewardsActor, Share} from "../../src/ServiceRewardsActor.sol";
+import {FixedU18} from "../../src/lib/FixedU18.sol";
 
 /// @dev Differential test harness: inherits ServiceRewardsActor, exposing the internal
 ///      _computeShares (largest-remainder share allocation) via a public wrapper for the
@@ -31,6 +32,12 @@ contract DifferentialSharesHarness is ServiceRewardsActor {
         pure
         returns (Share[] memory)
     {
-        return _computeShares(wallets, usds, count, total);
+        // Public test entry keeps uint256 (the postVolume input form); wrap to FixedU18 (values are
+        // already 18-decimal USD, no scaling) so the production _computeShares runs type-checked.
+        FixedU18[] memory f18 = new FixedU18[](usds.length);
+        for (uint256 i = 0; i < usds.length; i++) {
+            f18[i] = FixedU18.wrap(usds[i]);
+        }
+        return _computeShares(wallets, f18, count, FixedU18.wrap(total));
     }
 }

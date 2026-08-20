@@ -23,6 +23,7 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {Epoch, currentEpoch} from "./lib/Epoch.sol";
+import {FixedU18, ONE, ONE_WAD} from "./lib/FixedU18.sol";
 import {FVMRewards} from "./lib/FVMRewards.sol";
 import {Share} from "./lib/FVMRewardTypes.sol";
 import {OwnersLibrary} from "./lib/Owners.sol";
@@ -56,16 +57,16 @@ contract ServiceRewardsActor is UnanimousGovernance {
     uint256 private constant MAX_PAIRS = 64; // registerPairs batch bound, aligns with MAX_ORCHESTRATORS
     uint256 private constant MAX_ALLOWLIST = 64; // per-allowlist array bound
 
-    /// @dev Business-domain upper bound on the quarterly FPV input.
+    /// @dev Business-domain upper bound on the quarterly FPV input (18-decimal FixedU18: 1e30 wraps 1e12 USD).
     ///      With the FIL→USD conversion moved off-chain (FIPs#1275), the FPV input is a single USD total,
     ///      so the on-chain arithmetic that must not overflow is only _computeShares:
-    ///        - per-orchestrator usd ≤ 1e30 → usd × SHARE_TOTAL(1e18) ≤ 1e48 ≪ 2^256
+    ///        - per-orchestrator usd_f ≤ 1e30 → usd_f × 1e18 ≤ 1e48 ≪ 2^256
     ///        - total (≤ MAX_ORCHESTRATORS 64) ≤ 64 × 1e30 = 6.4e31 ≪ 2^256
-    ///      Magnitude rationale: the assumed business domain is ~1e6 USD/quarter (§5.5); 1e30 is ~24 orders
-    ///      of magnitude above it — loose-by-design headroom (immutable constant, permanent), while the
-    ///      arithmetic chain still closes with ~200 orders of magnitude to spare.
+    ///      Magnitude rationale: the assumed business domain is ~1e6 USD/quarter (§5.5); 1e12 USD is ~6
+    ///      orders of magnitude above it — loose-by-design headroom (immutable constant, permanent), while
+    ///      the arithmetic chain still closes with ~29 orders of magnitude to spare (1e48 → 2^256 ≈ 1.16e77).
     ///      ⚠️ Maintenance: the closure assumes MAX_FPV_USD and MAX_ORCHESTRATORS(64) hold together.
-    uint256 private constant MAX_FPV_USD = 1e30; // single USD total per quarter per orchestrator
+    FixedU18 private constant MAX_FPV_USD = FixedU18.wrap(1e30); // single USD total per quarter per orchestrator (18-decimal)
 
     // Epoch-typed immutables (EPOCHS_PER_QUARTER public — sole source of truth for both the SRA
     // and the SWA; SWA reads it via the auto-generated getter instead of duplicating quarter config).
@@ -113,7 +114,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     event PricingParamsUpdated(uint256 minLot, uint256 priceBand);
     event VolumePosted(uint64 indexed q, address indexed orch);
     event VolumeCorrected(uint64 indexed q, address indexed orch);
-    event SharesSubmitted(uint64 indexed q, uint256 recipientCount, uint256 totalUsd);
+    event SharesSubmitted(uint64 indexed q, uint256 recipientCount, FixedU18 totalUsd);
 
     error NotAdmitted(address orch);
     error AlreadyAdmitted(address orch);
@@ -261,7 +262,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
     /// @notice During posting, at most one posting per quarter; the value is a single USD total
     ///         (FPV_i(Q): stablecoin face USD + off-chain-converted FIL volume, FIP-0118 FIPs#1275).
-    function postVolume(uint64 q, uint256 fpv) external {
+    function postVolume(uint64 q, FixedU18 fpv) external {
         // single storage pointer — avoids hashing the orchestrators mapping twice
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.OrchestratorInfo storage o = r.orchestrators[msg.sender];
@@ -277,7 +278,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         FPV storage stored = qt.fpv[q][msg.sender];
         require(!stored.posted, AlreadyPosted(q));
 
-        stored.usd = uint128(fpv); // MAX_FPV_USD(1e30) < uint128.max — safe narrowing (FPV storage packing)
+        stored.usd = fpv; // FixedU18 — 18-decimal USD, type-checked from the entry
         stored.posted = true;
 
         emit VolumePosted(q, msg.sender);
@@ -439,7 +440,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     ///         or supplies the recomputed figure for an unposted orchestrator; exempt from SRA_CANCEL_HOLD (spec §4.2/§5.3
     ///         window-is-hold), allows bidirectional correction. Value is a single USD total (FIP-0118 FIPs#1275).
     /// @dev The unanimousNoHold modifier handles dual-Safe owner validation; the function body validates the verification window.
-    function correctVolume(address orch, uint64 q, uint256 value) external unanimousNoHold(keccak256(msg.data)) {
+    function correctVolume(address orch, uint64 q, FixedU18 value) external unanimousNoHold(keccak256(msg.data)) {
         require(_inVerificationWindow(q), NotInVerificationWindow(q));
         require(_isAdmitted(orch), NotAdmitted(orch));
 
@@ -448,7 +449,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
         FPV storage stored = qt.fpv[q][orch];
-        stored.usd = uint128(value); // MAX_FPV_USD(1e30) < uint128.max — safe narrowing (FPV storage packing)
+        stored.usd = value; // FixedU18 — 18-decimal USD
         stored.posted = true;
 
         emit VolumeCorrected(q, orch);
@@ -475,22 +476,22 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
         // Collect non-excluded (not frozen at the E+POST instant) orchestrators with posted usd > 0
         address[] memory wallets = new address[](r.admittedList.length);
-        uint256[] memory usds = new uint256[](r.admittedList.length);
+        FixedU18[] memory usds = new FixedU18[](r.admittedList.length);
         uint256 count = 0;
-        uint256 total = 0;
+        FixedU18 total;
         for (uint256 i = 0; i < r.admittedList.length; i++) {
             address orch = r.admittedList[i];
             if (_frozenAtPostEnd(orch, q)) continue;
-            uint256 usd = qt.fpv[q][orch].usd;
-            if (usd == 0) continue;
+            FixedU18 usd = qt.fpv[q][orch].usd;
+            if (FixedU18.unwrap(usd) == 0) continue;
             wallets[count] = _resolve(orch);
             usds[count] = usd;
-            total += usd;
+            total = total + usd;
             count++;
         }
 
         // FIP-0118: an all-zero quarter is a benign no-op — no SplitRule, no SetShares, existing map stands.
-        if (total == 0) return;
+        if (FixedU18.unwrap(total) == 0) return;
 
         Share[] memory shares = _computeShares(wallets, usds, count, total);
         // Trim zero-share entries: the largest-remainder method can floor a tiny usd to 0
@@ -510,7 +511,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
         qt.sharesSubmitted[q] = true; // CEI: mark before the external call
         FVMRewards.setShares(SERVICE_STREAM_ID, shares);
-        emit SharesSubmitted(q, shares.length, total);
+        emit SharesSubmitted(q, shares.length, total); // totalUsd as FixedU18 (18-decimal USD)
     }
 
     // ------------------------------------------------------------------------
@@ -523,7 +524,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     ///         on-chain finalize to trigger.
     /// @dev Reverts NotBound(q) before binding — distinguishes "quarter not yet bound" (call too early; the SWA
     ///      does not need to re-enforce the check) from "quarter with zero declared volume" (legitimately returns 0).
-    function aggregatedFPV(uint64 q) external view returns (uint256 usd) {
+    function aggregatedFPV(uint64 q) external view returns (FixedU18 usd) {
         require(_afterBinding(q), NotBound(q));
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.SraStorageQuarter storage qt = _quarter();
@@ -532,7 +533,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
             if (_frozenAtPostEnd(orch, q)) continue;
             FPV storage fpv = qt.fpv[q][orch];
             if (!fpv.posted) continue;
-            usd += fpv.usd;
+            usd = usd + fpv.usd; // FixedU18 addition — 18-decimal fixed point, matches IServiceRewardsActor
         }
     }
 
@@ -579,7 +580,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // ------------------------------------------------------------------------
 
     /// @dev SplitRule share computation: floor + largest-remainder method (design §2.5.3, T1: remainder descending, first residue entries +1).
-    function _computeShares(address[] memory wallets, uint256[] memory usds, uint256 n, uint256 total)
+    function _computeShares(address[] memory wallets, FixedU18[] memory usds, uint256 n, FixedU18 total)
         internal
         pure
         returns (Share[] memory shares)
@@ -588,9 +589,20 @@ contract ServiceRewardsActor is UnanimousGovernance {
         uint256[] memory remainders = new uint256[](n);
         bool[] memory bumped = new bool[](n);
         uint256 residue = SHARE_TOTAL;
+        // Remainders keep the integer-USD formulation (usd * 1e18 % total): the FixedU18 division
+        // shareF = usds[i] * ONE / total computes div(mul(usd, 1e18), total), so its integer
+        // remainder is usd * 1e18 % total — identical ordering to the previous uint256 path.
+        uint256 totalUsd = FixedU18.unwrap(total);
         for (uint256 i = 0; i < n; i++) {
-            shares[i] = Share({wallet: wallets[i], share: usds[i] * SHARE_TOTAL / total});
-            remainders[i] = usds[i] * SHARE_TOTAL % total;
+            // 18-decimal fixed-point: usd * SHARE_TOTAL / total, mathematically identical to the
+            // integer-USD form (usd_f = usd, total_f = total are already 18-decimal). Type-safe
+            // against integer/fixed-point magnitude mixing.
+            FixedU18 shareF = usds[i] * ONE / total;
+            shares[i] = Share({wallet: wallets[i], share: FixedU18.unwrap(shareF)});
+            // remainder = (usd_f × 1e18) % total_f = (usd × 1e18 % total_int) × 1e18 — the integer-USD
+            // remainder scaled by 1e18; the common ×1e18 factor preserves relative ordering, so the
+            // largest-remainder assignment order is bit-identical to the integer formulation.
+            remainders[i] = FixedU18.unwrap(usds[i]) * ONE_WAD % totalUsd;
             residue -= shares[i].share;
         }
         // Remainder descending: each round tops up +1 to the largest remaining remainder (n <= 64, O(n²) acceptable)

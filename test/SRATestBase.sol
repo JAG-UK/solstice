@@ -22,6 +22,8 @@ import {MockRewardTest} from "./mocks/MockRewardTest.sol";
 import {WAD} from "./mocks/FVMRewardActor.sol";
 
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
+import {Epoch} from "../src/lib/Epoch.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 import {Pair} from "../src/lib/SraTypes.sol";
 import {Share, WeightRecord} from "../src/lib/FVMRewardTypes.sol";
 import {FVMRewards} from "../src/lib/FVMRewards.sol";
@@ -94,7 +96,7 @@ contract SRATestBase is MockRewardTest {
         initialShares[0] = Share({wallet: address(sra), share: 1e18});
         int256 exitCode = FVMRewards.tryRegisterStream(
             SERVICE_STREAM_ID,
-            WeightRecord({vStart: 0, slope: 0, tStart: 0, floor: 0, cap: WAD}),
+            WeightRecord({vStart: 0, slope: 0, tStart: Epoch.wrap(0), floor: 0, cap: WAD}),
             address(sra),
             initialShares,
             uint64(block.number) + SWA_TIMELOCK
@@ -182,17 +184,19 @@ contract SRATestBase is MockRewardTest {
     }
 
     /// @notice correctVolume uses unanimousNoHold: the second vote executes, no roll needed.
+    /// @dev value is an 18-decimal USD figure; wrapped to FixedU18 at the contract boundary.
     function _correctVolume(address orch, uint64 q, uint256 value) internal {
         vm.prank(owner1);
-        sra.correctVolume(orch, q, value);
+        sra.correctVolume(orch, q, FixedU18.wrap(value));
         vm.prank(owner2);
-        sra.correctVolume(orch, q, value);
+        sra.correctVolume(orch, q, FixedU18.wrap(value));
     }
 
     /// @notice posts a single USD total as the orchestrator within quarter q's posting window.
+    /// @dev fpv is an 18-decimal USD figure; wrapped to FixedU18 at the contract boundary.
     function _postAs(address orch, uint64 q, uint256 fpv) internal {
         vm.prank(orch);
-        sra.postVolume(q, fpv);
+        sra.postVolume(q, FixedU18.wrap(fpv));
     }
 
     /// @notice registers binding pairs as the orchestrator within quarter q's posting window.

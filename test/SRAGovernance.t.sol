@@ -13,6 +13,7 @@ pragma solidity ^0.8.36;
 // ============================================================================
 
 import {SRATestBase} from "./SRATestBase.sol";
+import {FixedU18} from "../src/lib/FixedU18.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {FPV} from "../src/lib/SraTypes.sol";
 import {UnanimousGovernance} from "../src/lib/UnanimousGovernance.sol";
@@ -149,16 +150,16 @@ contract SRAGovernanceTest is SRATestBase {
 
         vm.roll(_qPostEnd(0) + 1); // verification window
         vm.prank(owner1);
-        sra.correctVolume(orch, 0, 250e18);
+        sra.correctVolume(orch, 0, FixedU18.wrap(250e18));
         // after the first vote not effective (not full vote): the value is still the posted value
         FPV memory f1 = sra.fpvOf(0, orch);
-        assertEq(f1.usd, 100e18);
+        assertEq(FixedU18.unwrap(f1.usd), 100e18);
 
         vm.prank(owner2);
-        sra.correctVolume(orch, 0, 250e18); // second vote executes immediately
+        sra.correctVolume(orch, 0, FixedU18.wrap(250e18)); // second vote executes immediately
 
         FPV memory f2 = sra.fpvOf(0, orch);
-        assertEq(f2.usd, 250e18);
+        assertEq(FixedU18.unwrap(f2.usd), 250e18);
     }
 
     /// Strategy 6: before correctVolume's second vote (not a full vote), a repeat vote reverts AlreadyApproved.
@@ -170,10 +171,10 @@ contract SRAGovernanceTest is SRATestBase {
         vm.roll(_qPostEnd(0) + 1);
 
         vm.prank(owner1);
-        sra.correctVolume(orch, 0, _fpv(200e18));
+        sra.correctVolume(orch, 0, FixedU18.wrap(_fpv(200e18)));
         vm.prank(owner1);
         vm.expectRevert(abi.encodeWithSelector(UnanimousGovernance.AlreadyApproved.selector));
-        sra.correctVolume(orch, 0, _fpv(200e18));
+        sra.correctVolume(orch, 0, FixedU18.wrap(_fpv(200e18)));
     }
 
     // ------------------------------------------------------------------------
