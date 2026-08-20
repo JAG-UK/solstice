@@ -22,7 +22,7 @@ Core features:
 
 - Scope: all key decisions for Issue #4, from design to PR.
 - Decision groups used throughout: **D** design decisions (settled) | **S** structural decisions (approval) | **C** conflict rulings (found test-first) | **T** test decisions (defect fixes) | **G** coverage-gap closures | **I/R** implementation-layer risks and mitigations.
-- Status: all landed — design approved and converged; implementation **261/261 tests Green** (117 SRA deterministic + 5 invariant + 139 existing; FIPs#1275 off-chain-conversion adaptation removed the band/finalize/burn suites); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS + quarter-window 4/4 PASS; final code review PASS; audit hardening V1/V2/V3 (overflow DoS) + B1/C1/E1/E2/F2 (remaining input-domain bounds) + QA-system fixes S1-S5 landed; FIPs#1275 adaptation landed (FPV single USD total, off-chain conversion, all-zero no-op).
+- Status: all landed — design approved and converged; implementation **261/261 tests Green** (117 SRA deterministic + 5 invariant + 139 existing; FIPs#1275 off-chain-conversion adaptation removed the band/finalize/burn suites); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification quarter-window 4/4 PASS (`_computeShares` largest-remainder checks dropped — FixedU18 assembly ops not symbolizable; algorithm properties covered by differential + invariant fuzz); final code review PASS; audit hardening V1/V2/V3 (overflow DoS) + B1/C1/E1/E2/F2 (remaining input-domain bounds) + QA-system fixes S1-S5 landed; FIPs#1275 adaptation landed (FPV single USD total, off-chain conversion, all-zero no-op).
 
 ### 1.3 Source Annotation System
 
@@ -439,7 +439,7 @@ submitShares(Q):
 | G | G1-G7 | ✅ closed (58 → 74 → 77 → 91 → 94 → 96 → 100 → 103 → 109 → 123 → 151 tests; band/period gaps G3/G4 removed with the mechanism) |
 | I/R | I1 / I2 / I5 / R1 | ✅ mitigations landed (tests + implementation semantics double assurance) |
 
-**Final acceptance**: the implementation aligns with all design rulings, and the spec-conformance deviations A/B/C/D/E were reviewed by the user one by one and uniformly landed (T11); **FIPs#1275 adaptation landed** (FPV single USD total, off-chain FIL→USD conversion, on-chain band/finalize/burn machinery removed, all-zero quarter = benign no-op); **261/261 tests Green** (117 SRA deterministic + 5 invariant + 139 existing); SRA line coverage 100%, branch 67.16% (tool statistical ceiling; governance function-body require branches under-counted by the lcov modifier quirk); `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification `_computeShares` 6/6 PASS + quarter-window 4/4 PASS; final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; audit hardening V1/V2/V3 (overflow DoS, input-domain bounds) and B1/C1/E1/E2/F2 (remaining bounds + owner rotation) landed with 6 + 8 regression tests; QA-system fixes S1-S5 landed (adversarial input matrix 28 tests / security-claim-to-code map / evidence-condition annotation / threat model matrix / reviewer checklist).
+**Final acceptance**: the implementation aligns with all design rulings, and the spec-conformance deviations A/B/C/D/E were reviewed by the user one by one and uniformly landed (T11); **FIPs#1275 adaptation landed** (FPV single USD total, off-chain FIL→USD conversion, on-chain band/finalize/burn machinery removed, all-zero quarter = benign no-op); **261/261 tests Green** (117 SRA deterministic + 5 invariant + 139 existing); SRA line coverage 100%, branch 67.16% (tool statistical ceiling; governance function-body require branches under-counted by the lcov modifier quirk); `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification quarter-window 4/4 PASS (`_computeShares` checks dropped, FixedU18 symbolic-execution limit — covered by differential + invariant fuzz); final code review PASS; the A2 real defect (T10) fixed with 2 deterministic regression tests guarding it; audit hardening V1/V2/V3 (overflow DoS, input-domain bounds) and B1/C1/E1/E2/F2 (remaining bounds + owner rotation) landed with 6 + 8 regression tests; QA-system fixes S1-S5 landed (adversarial input matrix 28 tests / security-claim-to-code map / evidence-condition annotation / threat model matrix / reviewer checklist).
 
 ## 4. Test Strategy and Coverage
 
@@ -710,7 +710,7 @@ forge test --match-contract DifferentialShares
 
 # --- symbolic verification (halmos) ---
 # 不进 CI（决策，见 .github/workflows/test.yml 注释）：需独立 `forge build --ast` 一遍(~2min)
-# + SMT 求解 ~3min(ComputeSharesCheck ~125s + QuarterWindowCheck)，且与 via-IR 字节码瘦身
+# + SMT 求解 ~3min(QuarterWindowCheck)，且与 via-IR 字节码瘦身
 # (EIP-170) 冲突——harness 继承主合约但不走构造器，via-IR 下 immutable 未赋值直接编译失败。
 # 仅在此类变更时手动跑：存储布局 / 数值计算 / 窗口边界逻辑改动，或每次发布前。
 # 前置: forge 1.7+ 默认不为 test 合约输出 AST, 而 halmos 从 out/ 读取 ast 字段 —— 先 `forge build --ast`
@@ -719,7 +719,6 @@ forge build --ast
 # 两个 harness 的父构造器含 Safe 检查(isProbablyASafe), halmos 符号执行 constructor 会路径超限
 # ("ValueError: constructor: # of paths")——必须 --no-test-constructor; --loop 64 展开余数补位循环;
 # 默认 SMT branching timeout=1ms 太短, 需加大
-halmos --contract ComputeSharesCheck --no-test-constructor --loop 64 --solver-timeout-branching 2000 --solver-timeout-assertion 60000   # _computeShares 6/6 (~125s)
 halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-timeout-branching 2000 --solver-timeout-assertion 60000   # quarter-window state machine 4/4
 # ("Skipped console2.json ... KeyError: 'metadata'" 是无害 warning, forge-std 库文件, 可忽略)
 
@@ -912,16 +911,14 @@ The V1 (PRICE_BAND anchor pollution) and V2 (finalizeConversion overflow) analys
   - `naming-convention` × 5 (immutable uppercase constants) — Solidity convention, not a risk.
 - Not triggered: reentrancy / unchecked / integer-overflow / tx.origin / delegatecall risk detectors.
 
-#### Halmos (C1): 6/6 symbolic verification PASS
-
-- Target: `_computeShares` (largest-remainder method, pure function).
-- Properties: conservation (n=1/2/3, Σ==1e18) ✅ | monotonicity (larger usd gets ≥ share) ✅ | floor bound (each share ∈ {floor, floor+1}) ✅ | no overflow (business domain) ✅.
-- Run: 前置 `forge build --ast`（forge 1.7+ 默认不为 test 合约输出 AST；halmos 0.1.13 读 out/ 需要 ast 字段），然后 `halmos --contract ComputeSharesCheck --no-test-constructor --loop 64 --solver-timeout-branching 2000 --solver-timeout-assertion 60000`, ~125s. 完整命令见 §4.5.
-- **Value-domain note**: symbolic domain 1e3 (shares depend only on usd ratios; equal scaling does not change allocation, so the ratio space is fully covered; 012 report §C1 details the 1e40→1e3 tightening process and SMT-solving trade-offs).
-
 #### State-machine verification (quarter windows): 4/4 PASS
 
 - Target: `test/halmos/QuarterWindowCheck.sol` — 4 parameter-independent propositions (T2a/T3/T4/T5b), see §4.3.8.
+- Note: the `_computeShares` symbolic checks (largest-remainder) were **removed** — the FixedU18 operators are
+  assembly `div`/`mul` and produce SMT constraints the solver cannot discharge under symbolic execution
+  (timeouts / revert-all; probe experiments confirmed). The largest-remainder properties remain covered by the
+  **differential suite** (fixed-case bit-exact assertions) and **invariant fuzz** (SumShares conservation over
+  random action sequences). Restorable from git history if tool support improves.
 
 ### 5.11 Handled Defects and Same-Pattern Residual Risk Checklist
 
