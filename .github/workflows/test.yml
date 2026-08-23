@@ -24,11 +24,8 @@ jobs:
           forge install
 
       - name: Run tests
-        # Symbolic verification (halmos) is intentionally NOT part of CI: it needs a
-        # separate `forge build --ast` pass (~2 min) plus ~3 min of SMT solving per run
-        # (ComputeSharesCheck ~125s + QuarterWindowCheck), and it conflicts with the
-        # via-IR profile needed to stay under the EIP-170 size limit (harnesses inherit
-        # the actor without a constructor; via-IR rejects unassigned immutables). It is
-        # run manually per release / on storage-layout or math changes — see docs/sra-design.md §4.5.
+        # Symbolic verification (halmos) runs in its own workflow (halmos.yml),
+        # independent of this CI — it needs halmos plus a separate `forge build --ast`
+        # pass (see docs/sra-design.md §4.5).
         run: |
           forge test

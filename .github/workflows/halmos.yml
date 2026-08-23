@@ -1,0 +1,32 @@
+name: Halmos
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  halmos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+          cache: true
+
+      - name: Install Dependencies
+        run: |
+          forge install
+
+      - name: Run symbolic verification
+        # QuarterWindowCheck only (the former ComputeSharesCheck was removed with
+        # the FixedU18 adoption — see docs/sra-design.md §4.5). Runs independently
+        # of the main test CI; it needs halmos plus a `forge build --ast` pass.
+        run: |
+          pip install --break-system-packages halmos
+          halmos --contract QuarterWindowCheck --no-test-constructor
