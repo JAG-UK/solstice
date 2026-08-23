@@ -165,6 +165,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
         // deployment-time parameter validation, aligned with setPricingParams
         require(priceBand <= BASIS_POINTS, InvalidParameter());
         require(epochsPerQuarter > 0 && postPeriod > 0 && verificationWindow > 0, InvalidParameter());
+        // Review B1: the mirror advances only forward, so the windows must not overlap — a quarter's
+        // verification window closing after the next quarter has begun would let a governance
+        // CorrectVolume target an already-advanced quarter, rewinding activeQ (uint256 intermediate
+        // guards the addition against overflow).
+        require(uint256(postPeriod) + uint256(verificationWindow) <= uint256(epochsPerQuarter), InvalidParameter());
 
         EPOCHS_PER_QUARTER = Epoch.wrap(epochsPerQuarter);
         POST_PERIOD = Epoch.wrap(postPeriod);
@@ -237,6 +242,18 @@ contract ServiceRewardsActor is UnanimousGovernance {
         return (false, 0);
     }
 
+    /// @dev Mirror advance guard (review B1): a write may target the active quarter (q == activeQ,
+    ///      same-quarter updates) or the next quarter (q == activeQ + 1 — the first write of a new
+    ///      quarter advances the mirror). Anything else is rejected: q < activeQ would rewind the
+    ///      mirror (backing up and clearing a later quarter's contributions — possible when the
+    ///      windows overlap, hence also forbidden at the constructor), and q > activeQ + 1 would
+    ///      skip a quarter, misaligning the prevFpv mirror (it can only hold activeQ - 1's data).
+    ///      The window checks already bound q in a non-overlapping configuration; this guard is
+    ///      defense-in-depth if the deployment parameters ever change.
+    function _assertMirrorWindow(SraStorage.SraStorageQuarter storage qt, uint64 q) internal view {
+        require(q == qt.activeQ || q == qt.activeQ + 1, InvalidParameter());
+    }
+
     /// @dev Mirror advance: the first write of a new quarter (postVolume or correctVolume with
     ///      q != activeQ) backs the active-quarter contributions up into the previous-quarter
     ///      mirror — exclusion-fixed (frozenAtPostEnd ? 0 : fpv), because the freeze state of the
@@ -303,6 +320,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         // Mirror advance on the first write of the quarter (q == activeQ afterwards; the
         // previous quarter's contributions back up into prevFpv, exclusion-fixed). The advance
         // clears the active slot, so the already-posted check below is against the new quarter.
+        _assertMirrorWindow(qt, q);
         if (qt.activeQ != q) _advanceMirror(qt, q);
         require(FixedU18.unwrap(o.fpv) == 0, AlreadyPosted(q));
         o.fpv = fpv; // FixedU18 — 18-decimal USD, type-checked from the entry
@@ -349,11 +367,17 @@ contract ServiceRewardsActor is UnanimousGovernance {
         require(o.admitted, NotAdmitted(orch));
         (bool hasPending, uint64 pendingQ) = _pendingSharesQuarter();
         if (hasPending) revert PendingShares(pendingQ);
-        // Mirror: drop the active-quarter contribution if it is still effective — a freeze
-        // before E+POST already deducted it (frozenAtPostEnd), so no double deduction.
-        if (!o.frozenAtPostEnd && FixedU18.unwrap(o.fpv) > 0) {
-            SraStorage.SraStorageQuarter storage qt = _quarter();
-            qt.totalUsd[qt.activeQ] = qt.totalUsd[qt.activeQ] - o.fpv;
+        // Mirror: drop the active-quarter contribution from the aggregate while the quarter is not
+        // yet bound — an orchestrator removed before binding is excluded: omitted from the
+        // submitted share map (it leaves the admitted list, which submitShares collects) and its
+        // FPV does not enter AggregatedFPV(Q) (spec §2.2). Once the verification window has closed
+        // the aggregate is a binding snapshot (the read view exposes the bound values directly) and
+        // a later removal must not rewrite it. The boundary is binding (not E+POST — freeze's
+        // boundary): unlike freeze, removal drops the orchestrator from the admitted list, so the
+        // map and the aggregate must exclude it together for every pre-binding removal (review S1).
+        uint64 q = _quarter().activeQ;
+        if (!_afterBinding(q) && !o.frozenAtPostEnd && FixedU18.unwrap(o.fpv) > 0) {
+            _quarter().totalUsd[q] = _quarter().totalUsd[q] - o.fpv;
         }
         o.admitted = false;
         o.frozenSince = Epoch.wrap(0);
@@ -518,7 +542,10 @@ contract ServiceRewardsActor is UnanimousGovernance {
         SraStorage.SraStorageQuarter storage qt = _quarter();
 
         // Mirror advance on the first write of the quarter — correctVolume can be the first
-        // writer (supplying recomputed figures for a quarter nobody posted).
+        // writer (supplying recomputed figures for a quarter nobody posted). Bounded by the
+        // window guard: q must be the active or the next quarter (rewinding would clear a later
+        // quarter's contributions — review B1).
+        _assertMirrorWindow(qt, q);
         if (qt.activeQ != q) _advanceMirror(qt, q);
 
         // Read the old value *after* the advance: on an advance the previous

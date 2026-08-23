@@ -331,6 +331,72 @@ contract SRAAdversarial is SRATestBase {
     // helpers
     // ------------------------------------------------------------------------
 
+    // ------------------------------------------------------------------------
+    // Review B1: mirror-advance direction guard + window-overlap constructor constraint
+    // ------------------------------------------------------------------------
+
+    /// Constructor rejects window overlap: a quarter's verification window must close before the
+    /// next quarter begins (POST + VERIFY <= EPOCHS), otherwise a governance CorrectVolume could
+    /// target an already-advanced quarter and rewind the mirror (review B1).
+    function test_Ctor_WindowOverlap_Rejected() public {
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        new ServiceRewardsActor(
+            owner1,
+            owner2,
+            500, // EPOCHS
+            300, // POST
+            400, // VERIFY: 300 + 400 = 700 > 500 -> overlap
+            SRA_CANCEL_HOLD,
+            ACTIVATION_EPOCH,
+            MIN_LOT,
+            PRICE_BAND
+        );
+    }
+
+    /// Constructor accepts the exact boundary: POST + VERIFY == EPOCHS (verification closes at the
+    /// next quarter's boundary — no overlap, the mirror stays forward-only).
+    function test_Ctor_WindowBoundary_Accepted() public {
+        // deployment succeeded (no revert) — the boundary POST + VERIFY == EPOCHS is accepted
+        new ServiceRewardsActor(
+            owner1,
+            owner2,
+            700, // EPOCHS
+            300, // POST
+            400, // VERIFY: 300 + 400 = 700 == EPOCHS -> accepted
+            SRA_CANCEL_HOLD,
+            ACTIVATION_EPOCH,
+            MIN_LOT,
+            PRICE_BAND
+        );
+    }
+
+    /// A write must target the active or the next quarter: skipping a quarter (q > activeQ + 1)
+    /// would misalign the prevFpv mirror (it can only hold activeQ - 1's data) — rejected by the
+    /// mirror-window guard (review B1).
+    function test_PostVolume_SkipQuarter_Reverts() public {
+        address orch = makeAddr("orch");
+        _admit(orch);
+
+        vm.roll(_qEnd(2) + 1); // Q2 posting window; mirror still at genesis activeQ = 0
+        vm.prank(orch);
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        sra.postVolume(2, FixedU18.wrap(_fpv(100e18)));
+    }
+
+    /// Same guard on the governance path: CorrectVolume may not target a quarter beyond the next
+    /// one (unanimousNoHold: the second approval executes the body and reverts).
+    function test_CorrectVolume_SkipQuarter_Reverts() public {
+        address orch = makeAddr("orch");
+        _admit(orch);
+
+        vm.roll(_qEnd(2) + POST_PERIOD + 1); // Q2 verification window; activeQ still 0
+        vm.prank(owner1);
+        sra.correctVolume(orch, 2, FixedU18.wrap(_fpv(100e18)));
+        vm.prank(owner2);
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
+        sra.correctVolume(orch, 2, FixedU18.wrap(_fpv(100e18)));
+    }
+
     function _sumShares(Share[] memory shares) internal pure returns (uint256 sum) {
         for (uint256 i = 0; i < shares.length; i++) {
             sum += shares[i].share;

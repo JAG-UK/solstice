@@ -395,4 +395,75 @@ contract SRAggregateMirrorTest is SRATestBase {
         assertEq(shares[0].wallet, a, "map still the q1 distribution");
         assertEq(FixedU18.unwrap(sra.aggregatedFPV(2)), 0, "q2 has no contributions");
     }
+
+    /// Review S1: an orchestrator removed before the close of the posting period is excluded —
+    /// its FPV does not enter AggregatedFPV(Q) (spec §2.2). With activeQ still in its posting
+    /// window the removal deducts the contribution from the aggregate (read once the quarter binds).
+    function test_Mirror_Remove_InPostingWindow_DeductsAggregate() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        vm.roll(_qEnd(0) + 1); // Q0 posting window
+        _postAs(a, 0, _fpv(100e18));
+        _postAs(b, 0, _fpv(200e18));
+
+        _remove(b); // still within E+POST (hold 100 < POST 300): contribution excluded
+
+        vm.roll(_qVerifyEnd(0) + 1); // Q0 binds — aggregate readable
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18, "removed pre-E+POST FPV excluded");
+    }
+
+    /// Review S1: once the verification window closes, AggregatedFPV(activeQ) is a fixed binding
+    /// snapshot (spec §2.2: the read view exposes the bound values directly). A removal after
+    /// binding must not rewrite it — only a pre-E+POST removal excludes the contribution. The
+    /// former code deducted totalUsd unconditionally, drifting the bound aggregate.
+    function test_Mirror_Remove_AfterBinding_KeepsSnapshot() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        vm.roll(_qEnd(0) + 1); // Q0 posting window
+        _postAs(a, 0, _fpv(100e18));
+        _postAs(b, 0, _fpv(200e18));
+
+        vm.roll(_qVerifyEnd(0) + 1); // Q0 binds
+        sra.submitShares(0);
+        Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 2, "both contributors in the bound map");
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 300e18, "bound aggregate");
+
+        _remove(b); // post-binding removal: aggregate is a binding snapshot, must not drift
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 300e18, "bound aggregate unchanged after removal");
+        shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 2, "submitted map stands (removal does not rewrite a submitted map)");
+    }
+
+    /// Review S1: a removal in the verification window (E+POST passed, not yet bound) must exclude
+    /// the orchestrator from BOTH the share map (it leaves the admitted list, which submitShares
+    /// collects) and the aggregate — otherwise aggregatedFPV(0) = 300 != map sum 100. The former
+    /// E+POST boundary (freeze's) left the aggregate at 300 while the map dropped b (probe).
+    function test_Mirror_Remove_InVerificationWindow_Excludes() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        vm.roll(_qEnd(0) + 1); // Q0 posting window
+        _postAs(a, 0, _fpv(100e18));
+        _postAs(b, 0, _fpv(200e18));
+
+        vm.roll(_qPostEnd(0) + 1); // Q0 verification window (E+POST+1); the 100-epoch hold keeps the
+        // executing removal inside the window (E+401 < E+700), not yet bound
+        _remove(b);
+
+        vm.roll(_qVerifyEnd(0) + 1); // Q0 binds
+        sra.submitShares(0);
+        Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 1, "removed orchestrator absent from the map");
+        assertEq(shares[0].wallet, a, "map = a only");
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18, "removed FPV excluded -- consistent with map");
+    }
 }
