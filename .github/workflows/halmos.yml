@@ -19,14 +19,29 @@ jobs:
           version: v1.7.1
           cache: true
 
+      - name: Set up Python
+        # halmos 0.1.x predates the halmos 0.3 CLI (which dropped
+        # --no-test-constructor and changed solver defaults); pin the version
+        # verified locally (QuarterWindowCheck 2/2 PASS) on a Python it supports.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install Dependencies
         run: |
           forge install
 
+      - name: Build (AST for halmos)
+        # halmos reads the forge build-info (AST) from out/; the default forge
+        # build embeds it — the explicit pass makes the artifact deterministic
+        # for the symbolic run (extra_output metadata only, no via-ir build).
+        run: |
+          forge build --force --extra-output metadata
+
       - name: Run symbolic verification
         # QuarterWindowCheck only (the former ComputeSharesCheck was removed with
         # the FixedU18 adoption — see docs/sra-design.md §4.5). Runs independently
-        # of the main test CI; it needs halmos plus a `forge build --ast` pass.
+        # of the main test CI.
         run: |
-          pip install --break-system-packages halmos
+          pip install halmos==0.1.13
           halmos --contract QuarterWindowCheck --no-test-constructor
