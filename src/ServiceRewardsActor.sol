@@ -556,10 +556,22 @@ contract ServiceRewardsActor is UnanimousGovernance {
         SraStorage.SraStorageQuarter storage qt = _quarter();
         require(q + 1 != qt.lastSubmittedQ, AlreadySubmitted(q));
 
-        // q is the latest bound quarter: q == activeQ (bound, mirror not advanced yet) or
-        // q == activeQ - 1 (advanced). The mirror slots already encode the exclusion: the
-        // active-quarter read filters frozenAtPostEnd; prevFpv was exclusion-fixed at the advance.
-        bool usePrev = q != qt.activeQ;
+        // q is the latest bound quarter. The mirror has advanced only as far as the last written
+        // quarter (activeQ): q == activeQ reads the active slot (fpv); q == activeQ - 1 reads the
+        // previous-quarter mirror (prevFpv, exclusion-fixed at the advance). A q beyond activeQ
+        // bound with no write (posting/verification elapsed with no postVolume/correctVolume) has
+        // no data — an all-zero no-op: the quarter still counts as submitted, the existing map
+        // stands (previously any q != activeQ read prevFpv, misaligning the share map with the
+        // quarter: CI invariant_NonZeroTotal_ValidShareMap — 2 recipients against a snapshot count of 1).
+        bool usePrev;
+        if (q == qt.activeQ) {
+            usePrev = false;
+        } else if (qt.activeQ > 0 && q == qt.activeQ - 1) {
+            usePrev = true;
+        } else {
+            qt.lastSubmittedQ = q + 1;
+            return;
+        }
         address[] memory wallets = new address[](r.admittedList.length);
         FixedU18[] memory usds = new FixedU18[](r.admittedList.length);
         uint256 count = 0;

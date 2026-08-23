@@ -357,4 +357,42 @@ contract SRAggregateMirrorTest is SRATestBase {
         }
         return 0;
     }
+
+    /// invariant_NonZeroTotal_ValidShareMap regression (CI seed 0x8104...): submitShares(q) with q beyond the mirror's activeQ —
+    /// a quarter bound but never written (posting/verification elapsed with no contribution) —
+    /// must be an all-zero no-op, not a stale prevFpv submission. The previous code treated any
+    /// q != activeQ as the previous-quarter mirror (usePrev = q != activeQ), so submitting a
+    /// future bound quarter collected the *older* quarter's prevFpv and overwrote the share map
+    /// with a quarter-misaligned distribution (CI: share map 2 recipients > snapshot count 1).
+    function test_Mirror_SubmitShares_FutureBoundQuarter_NoOp() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        // q0: both post (activeQ=0, fpv slot)
+        vm.roll(_qEnd(0) + 1);
+        _postAs(a, 0, _fpv(100e18));
+        _postAs(b, 0, _fpv(200e18));
+
+        // q1: only a is corrected (advance to q=1) — q0 backs up into prevFpv (a:100, b:200)
+        vm.roll(_qPostEnd(1) + 1);
+        _correctVolume(a, 1, _fpv(50e18));
+
+        // submit q1 (latest bound, active quarter): map = [a], lastSubmittedQ = 2
+        vm.roll(_qVerifyEnd(1) + 1);
+        sra.submitShares(1);
+        Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 1, "q1 map = a only");
+        assertEq(shares[0].wallet, a);
+
+        // q2 binds with no contribution ever (the mirror never advanced to 2): submitShares(2)
+        // must be an all-zero no-op — map unchanged, the quarter still counts as submitted.
+        vm.roll(_qVerifyEnd(2) + 1);
+        sra.submitShares(2);
+        shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 1, "future bound quarter no-op leaves the map untouched");
+        assertEq(shares[0].wallet, a, "map still the q1 distribution");
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(2)), 0, "q2 has no contributions");
+    }
 }
