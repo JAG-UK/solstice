@@ -212,6 +212,39 @@ contract SRARegistryTest is SRATestBase {
         sra.postVolume(0, FixedU18.wrap(_fpv(100e18)));
     }
 
+    /// A2/A3 regression (correctVolume freeze symmetry): a frozen orchestrator cannot be re-admitted
+    /// into a quarter via the governance correctVolume path. Freeze suspends — the mirror advance
+    /// clears frozenAtPostEnd, so without this gate a freeze → correctVolume → advance sequence
+    /// would give a frozen orchestrator shares in the next quarter (A2/A3 invariant violation).
+    /// Unfreeze restores the governance correction path.
+    function test_CorrectVolume_Frozen_Reverts_UnfreezeRestores() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        vm.roll(_qEnd(0) + 1); // posting
+        _postAs(a, 0, _fpv(100e18));
+        _postAs(b, 0, _fpv(200e18));
+        _freeze(b); // posting window: b excluded from q0 (frozenAtPostEnd)
+
+        // verification window: correcting a frozen orchestrator must revert NotFrozen —
+        // the governance path must not re-admit a suspended orchestrator (unanimousNoHold:
+        // vote 1 approves, vote 2 executes the body where the gate fires)
+        vm.roll(_qPostEnd(0) + 1);
+        vm.prank(owner1);
+        sra.correctVolume(b, 0, FixedU18.wrap(_fpv(150e18))); // vote 1 (approve only)
+        vm.expectRevert();
+        vm.prank(owner2);
+        sra.correctVolume(b, 0, FixedU18.wrap(_fpv(150e18))); // vote 2 executes body -> NotFrozen
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, b).usd), 200e18, "frozen b's fpv untouched");
+
+        // unfreeze restores the governance correction path (fresh calldata -> fresh task)
+        _unfreeze(b);
+        _correctVolume(b, 0, _fpv(180e18));
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, b).usd), 180e18, "corrected after unfreeze");
+    }
+
     /// Strategy 3: unfreeze restores operation capability (registerPairs / postVolume).
     function test_Unfreeze_RestoresOperations() public {
         address orch = makeAddr("orch");

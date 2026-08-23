@@ -62,40 +62,5 @@ contract QuarterWindowCheck is QuarterWindowHarness, Test {
         uint256 gap0 = Epoch.unwrap(_qEnd(1)) - Epoch.unwrap(_qEnd(0));
         assert(gap == gap0);
     }
-
-    // ------------------------------------------------------------------------
-    // T4: freeze-snapshot time independence (S5 semantics, parameter-independent)
-    // ------------------------------------------------------------------------
-
-    /// @dev T4: _frozenAtPostEnd(orch,q)'s result is independent of the calling block.number (snapshot semantics,
-    ///      anti-timing-game). S5 promises "calling at any time yields the same answer" — exclusion cannot be
-    ///      bypassed by freezing after submitting / unfreezing before submitting. Symbolizes two different times
-    ///      and verifies identical results.
-    ///      (Note: when halmos's warp does not work, the verification strength degrades to "the function indeed
-    ///      does not read block.number", which is itself a necessary condition of the S5 snapshot semantics;
-    ///      combined with dynamic freeze tests it forms complete coverage.)
-    function check_T4_SnapshotTimeInvariant(uint64 q, uint256 t1, uint256 t2) public {
-        vm.assume(q <= 3);
-        vm.assume(t1 < 2 ** 48 && t2 < 2 ** 48 && t1 != t2);
-        address orch = address(0xCAFE);
-        _setFreezeInterval(orch, 100, 200);
-        vm.warp(t1);
-        bool r1 = _frozenAtPostEnd(orch, q);
-        vm.warp(t2);
-        bool r2 = _frozenAtPostEnd(orch, q);
-        assert(r1 == r2);
-    }
-
-    // ------------------------------------------------------------------------
-    // T5b: empty freeze history -> never frozen (does not depend on array element values; symbolically verifiable)
-    // ------------------------------------------------------------------------
-
-    /// @dev T5b: no freeze history (freezeEpochs empty) -> never frozen at any epoch.
-    ///      Verifies the empty-array boundary: _isFrozenAt returns false for empty history (zero iterations).
-    function check_T5b_IsFrozenAtEmpty(uint256 e) public view {
-        vm.assume(e < 1000);
-        address orch = address(0xBEEF);
-        assert(!_isFrozenAt(orch, Epoch.wrap(uint64(e))));
-    }
     // forge-lint: disable-end(mixed-case-function)
 }

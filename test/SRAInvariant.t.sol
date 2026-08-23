@@ -132,9 +132,16 @@ contract SRAInvariantHandler is SRATestBase {
     }
 
     /// @notice Atomic remove: releases the slot and frozen state; the implementation's remove explicitly clears successor, the handler must sync (I2).
+    /// @dev Spec §3.2/§4.4 timing guard: remove reverts while a bound quarter awaits its share map. The handler
+    ///      mirrors the spec's governance procedure — clear any pending quarter by cranking SubmitShares first
+    ///      (permissionless + idempotent; quarters beyond MAX_Q are never bound here), so the guard passes.
+    ///      The crank keeps the A2/A3 snapshot bookkeeping in sync with the contract.
     function remove(uint256 idx) external {
         address orch = _pickOrch(idx);
         if (!sra.isAdmitted(orch)) return;
+        for (uint64 qq = 0; qq <= MAX_Q; qq++) {
+            _crankSubmitShares(qq);
+        }
         bytes32 taskId = _taskId(sra.remove.selector, abi.encode(orch));
         vm.prank(owner1);
         sra.remove(orch);
@@ -255,7 +262,8 @@ contract SRAInvariantHandler is SRATestBase {
         // S3: bound(1, 1e30) aligns with the code-enforced MAX_STABLE_USD (postVolume rejects > 1e30) —
         // the invariant's sampling domain equals the contract's enforced input domain.
         uint256 stableUsd = bound(usd, 1, 1e30);
-        vm.roll(_qEnd(qq) + 1 + uint64(bound(usd, 0, POST_PERIOD - 1)));
+        uint256 target = _qEnd(qq) + 1 + uint64(bound(usd, 0, POST_PERIOD - 1));
+        if (block.number < target) vm.roll(target); // monotonic: real time never rewinds (mirror activeQ assumes forward-only quarters)
         vm.prank(orch);
         sra.postVolume(qq, FixedU18.wrap(_fpv(stableUsd)));
         _posted[qq][orch] = true;
@@ -266,9 +274,11 @@ contract SRAInvariantHandler is SRATestBase {
         uint64 qq = uint64(bound(q, 0, MAX_Q));
         address orch = _pickOrch(orchIdx);
         if (!sra.isAdmitted(orch)) return;
+        if (sra.isFrozen(orch)) return; // freeze symmetry: the implementation's correctVolume gates on frozenSince (A2/A3 fix)
         // S3: bound(1, 1e30) aligns with the code-enforced MAX_FPV_USD (correctVolume rejects > 1e30).
         uint256 stableUsd = bound(usd, 1, 1e30);
-        vm.roll(_qPostEnd(qq) + 1 + uint64(bound(usd, 0, VERIFICATION_WINDOW - 1)));
+        uint256 target = _qPostEnd(qq) + 1 + uint64(bound(usd, 0, VERIFICATION_WINDOW - 1));
+        if (block.number < target) vm.roll(target); // monotonic
         vm.prank(owner1);
         sra.correctVolume(orch, qq, FixedU18.wrap(stableUsd));
         vm.prank(owner2);
@@ -282,7 +292,15 @@ contract SRAInvariantHandler is SRATestBase {
     ///         not change), otherwise A2/A3 would compare a new snapshot against the stale map.
     function submitShares(uint256 q) external {
         uint64 qq = uint64(bound(q, 0, MAX_Q));
-        vm.roll(_qVerifyEnd(qq) + 1 + uint64(bound(q, 0, 50)));
+        uint256 target = _qVerifyEnd(qq) + 1 + uint64(bound(q, 0, 50));
+        if (block.number < target) vm.roll(target); // monotonic
+        _crankSubmitShares(qq);
+    }
+
+    /// @dev Best-effort SubmitShares crank (permissionless + idempotent): a successful submit with a
+    ///      non-zero total records the last-submit snapshot (A2/A3); a revert (NotBound/AlreadySubmitted)
+    ///      or an all-zero no-op leaves the previous snapshot valid (the map did not change).
+    function _crankSubmitShares(uint64 qq) internal {
         try sra.submitShares(qq) {
             _everSubmitted = true;
             // _snapshotPostEnd records only for non-zero-total quarters (no-op quarters return false)

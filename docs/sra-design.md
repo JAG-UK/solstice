@@ -22,7 +22,7 @@ Core features:
 
 - Scope: all key decisions for Issue #4, from design to PR.
 - Decision groups used throughout: **D** design decisions (settled) | **S** structural decisions (approval) | **C** conflict rulings (found test-first) | **T** test decisions (defect fixes) | **G** coverage-gap closures | **I/R** implementation-layer risks and mitigations.
-- Status: all landed — design approved and converged; implementation **261/261 tests Green** (117 SRA deterministic + 5 invariant + 139 existing; FIPs#1275 off-chain-conversion adaptation removed the band/finalize/burn suites); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification quarter-window 4/4 PASS (`_computeShares` largest-remainder checks dropped — FixedU18 assembly ops not symbolizable; algorithm properties covered by differential + invariant fuzz); final code review PASS; audit hardening V1/V2/V3 (overflow DoS) + B1/C1/E1/E2/F2 (remaining input-domain bounds) + QA-system fixes S1-S5 landed; FIPs#1275 adaptation landed (FPV single USD total, off-chain conversion, all-zero no-op).
+- Status: all landed — design approved and converged; implementation **303/303 tests Green** (SRA deterministic + 5 invariant + existing; FIPs#1275 off-chain-conversion adaptation removed the band/finalize/burn suites; the review-#10 aggregate mirror was refactored to the two-slot mirror + quarter counter array); SRA line coverage 100%; `forge fmt --check` / `forge lint` clean; Slither static analysis zero real risk; Halmos symbolic verification quarter-window 2/2 PASS (freeze-interval determinations `_frozenAtPostEnd`/`_isFrozenAt` removed with the mirror refactor — the E+POST exclusion is a stored flag; window-boundary properties verified symbolically); final code review PASS; audit hardening V1/V2/V3 (overflow DoS) + B1/C1/E1/E2/F2 (remaining input-domain bounds) + QA-system fixes S1-S5 landed; FIPs#1275 adaptation landed (FPV single USD total, off-chain conversion, all-zero no-op).
 
 ### 1.3 Source Annotation System
 
@@ -73,8 +73,8 @@ Used throughout this document:
 
 | Method | Signature | One-line semantics |
 |--------|-----------|--------------------|
-| `admit` | `admit(address orch)` | Admits an orchestrator; rejects when admitted total ≥ 64 (🔍 D2); re-admit = fresh identity (clears successor/frozen/freeze history, T10) |
-| `remove` | `remove(address orch)` | Permanent removal; releases all bindings (pairs return to unclaimed) (📄 §4.2) |
+| `admit` | `admit(address orch)` | Admits an orchestrator; rejects when admitted total ≥ 64 (🔍 D2); re-admit = fresh identity (clears successor/frozenSince/frozenAtPostEnd/fpv/prevFpv, T10) |
+| `remove` | `remove(address orch)` | Permanent removal; releases all bindings (pairs return to unclaimed) (📄 §4.2); **timing guard (📄 §3.2/§4.4)**: reverts `PendingShares(q)` while the latest bound quarter awaits its share map — governance clears it by cranking `SubmitShares` first |
 | `freeze` | `freeze(address orch)` | Freeze: suspends, zeroes shares, excludes FPV (📄 §4.2) |
 | `unfreeze` | `unfreeze(address orch)` | Exact restoration (📄 §4.2) |
 | `replace` | `replace(address oldOrch, address newOrch)` | Operator address change (📄 §4.2) |
@@ -90,7 +90,7 @@ Used throughout this document:
 
 | Method | Signature | One-line semantics |
 |--------|-----------|--------------------|
-| `correctVolume` | `correctVolume(address orch, uint64 Q, FixedU18 value)` | Only within the verification window, dual-Safe joint; replaces the posted value with the recomputed figure or backfills for an unposted orchestrator; exempt from SRA_CANCEL_HOLD, allows bidirectional correction (📄 §4.2/§5.3 + 🔍 D3a) |
+| `correctVolume` | `correctVolume(address orch, uint64 Q, FixedU18 value)` | Only within the verification window, dual-Safe joint; replaces the posted value with the recomputed figure or backfills for an unposted orchestrator; exempt from SRA_CANCEL_HOLD, allows bidirectional correction; **reverts `NotFrozen` for a suspended orchestrator** (freeze symmetry with `postVolume` — A2/A3 fix: the governance path must not re-admit a frozen orchestrator after the mirror advance cleared `frozenAtPostEnd`) (📄 §4.2/§5.3 + 🔍 D3a) |
 
 > `value` is a single USD-denominated total (same shape as PostVolume; the FIL→USD conversion happens off-chain, FIPs#1275) — **✏️ design derivation** (the spec writes "value" without defining the structure).
 
@@ -104,11 +104,11 @@ Used throughout this document:
 
 | Method | Signature | One-line semantics |
 |--------|-----------|--------------------|
-| `aggregatedFPV` | `aggregatedFPV(uint64 Q) returns (FixedU18 usd)` | Returns the post-binding USD aggregate (18-decimal fixed point, matching the SWA interface `IServiceRewardsActor`): Σ of each non-excluded posted orchestrator's bound USD value. **Pure view** — the FIL→USD conversion is off-chain (FIPs#1275), so there is no on-chain finalize to trigger (📄 §3.2/§4.2) |
+| `aggregatedFPV` | `aggregatedFPV(uint64 Q) returns (FixedU18 usd)` | Returns the post-binding USD aggregate (18-decimal fixed point, matching the SWA interface `IServiceRewardsActor`): Σ of each non-excluded posted orchestrator's bound USD value. **Pure view** — the FIL→USD conversion is off-chain (FIPs#1275), so there is no on-chain finalize to trigger (📄 §3.2/§4.2). **O(1) for every quarter via the quarter-counter array** (`totalUsd[Q]`, review #10 refactor): the active quarter reads the maintained counter; historical quarters read the binding-fixed snapshot (spec determinism — the registry is constant within a quarter, so the aggregate cannot drift with later remove/replace) |
 
 > **Contract declaration (FIPs#1275)**: `AggregatedFPV` reads only bound USD values — the spec's "reading AggregatedFPV triggers FinalizeConversion" clause was removed with the off-chain conversion. Reverts `NotBound(q)` before binding — distinguishing "quarter not yet bound" (call too early; the SWA does not need to re-enforce the check) from "quarter with zero declared volume" (legitimately returns 0). Locked by `test/SRAIntegration.t.sol` (§4.3.6, scenarios C1-C3).
 
-> Supplementary read-only views (✏️ design derivation, spec §4.2 says "read-only views expose the registry, bound volume, USD-denominated AggregatedFPV"): `isAdmitted(address)`, `isFrozen(address)`, `bindingOf(payer, operator)`, `fpvOf(Q, orch)`, `qEnd(uint64)`, `admittedCount()`, `getPricingParams()`, `orchestratorCount()` (+ C5: `isStablecoinAdmitted(address)` allowlist getter).
+> Supplementary read-only views (✏️ design derivation, spec §4.2 says "read-only views expose the registry, bound volume, USD-denominated AggregatedFPV"): `isAdmitted(address)`, `isFrozen(address)`, `bindingOf(payer, operator)`, `fpvOf(Q, orch)`, `qEnd(uint64)`, `admittedCount()`, `getPricingParams()`, `orchestratorCount()` (+ C5: `isStablecoinAdmitted(address)` allowlist getter). `fpvOf` retains per-orchestrator values only for the active and the previous quarter (mirror slots); earlier quarters return 0 — the aggregate (`totalUsd`) is the only historical read, which the spec requires (📄 §5 "Read state").
 
 ### 2.4 Data Structures (ERC-7201 namespace storage layout)
 
@@ -124,16 +124,22 @@ Used throughout this document:
 
 ```solidity
 struct OrchestratorInfo {
-    bool admitted;   // admitted
-    bool frozen;     // current frozen state (checked immediately by registerPairs/postVolume)
-    address successor; // replace alias chain; cleared on remove and on re-admit (T10)
-    Epoch[] freezeEpochs;    // epoch of each freeze execution (✅ S5 finalized: freeze history array)
-    Epoch[] unfreezeEpochs;  // epoch of each unfreeze execution
+    bool admitted;           // admitted
+    bool frozenAtPostEnd;    // frozen-at-E+POST flag: exactly "was this orchestrator frozen at the
+                             // close of the posting period of the active quarter" — the fpv-effectiveness
+                             // test. Changes only before E+POST (freeze/unfreeze in the posting window
+                             // set/clear it); from the verification window onward it is fixed.
+    Epoch frozenSince;       // current freeze state: 0 = not frozen; > 0 = frozen since this epoch
+                             // (admission checks + freeze/unfreeze symmetry)
+    address successor;       // replace alias chain; cleared on remove and on re-admit (T10)
+    FixedU18 fpv;            // active-quarter contribution (0 = not posted) — mirror slot
+    FixedU18 prevFpv;        // previous-quarter contribution mirror; exclusion-fixed at the mirror
+                             // advance (prevFpv <- frozenAtPostEnd ? 0 : fpv; fpv = 0)
 }
 struct SRAStorageRegistry {
     mapping(address orch => OrchestratorInfo) orchestrators;
     mapping(bytes32 pairId => address orch) bindings;  // pairId = keccak256(abi.encode(payer, operator))
-    uint64 admittedCount;   // includes frozen, used for the D2 cap check
+    address[] admittedList;   // enumerable admitted (incl. frozen); length doubles as the count (review #1)
 }
 ```
 
@@ -155,15 +161,25 @@ struct FPV {
                     // 18-decimal fixed point (1 USD = 1e18) — adopted per the SWA interface
                     // (IServiceRewardsActor.aggregatedFPV returns FixedU18) so every USD-consuming
                     // computation is type-safe against integer/fixed-point magnitude mixing.
-                    // Two storage slots (packing trade-off accepted; ~2.5% of quarterly gas).
+                    // One storage slot. usd == 0 means "not posted" (review #7: PostVolume
+                    // rejects zero; CorrectVolume(0) clears).
                     // MAX_FPV_USD(1e30) wraps as 1e48 < uint256.max — no narrowing at the write.
-    bool posted;    // posted flag (at most once per quarter)
 }
 struct SRAStorageQuarter {
-    mapping(uint64 Q => mapping(address orch => FPV)) fpv;
-    mapping(uint64 Q => bool) sharesSubmitted;   // FIPs#1275: SubmitShares reverts once a quarter's map is submitted
+    uint64 activeQ;            // the quarter the mirror has advanced to (postVolume/correctVolume set it
+                               // on the first write of a new quarter — the advance trigger). The previous
+                               // quarter's per-orchestrator contributions live in prevFpv (exclusion-fixed
+                               // at the advance); only these two quarters retain per-orchestrator values
+                               // (spec: CorrectVolume is bounded by the verification window, so no
+                               // historical corrections exist).
+    uint64 lastSubmittedQ;     // anti-replay: last submitted quarter + 1 (0 = none; q+1 encoding so
+                               // quarter 0 does not collide with the sentinel; monotonic, no reset)
+    mapping(uint64 Q => FixedU18) totalUsd;   // quarter counter array: per-quarter USD aggregate —
+                               // aggregatedFPV O(1) for every quarter, fixed once the mirror advances
 }
 ```
+
+> The mirror refactor (review #10, three-piece design) removed the per-quarter `fpv` map (`mapping(Q => mapping(orch => FPV))`), the `sharesSubmitted` map, and the former `mirrorActive/mirrorQ/totalUsd` fields. Per-orchestrator values are retained only for the active and the previous quarter (`fpv`/`prevFpv` slots) — historical per-orchestrator reads (`fpvOf(Q, orch)`) return 0 for earlier quarters, which the spec does not require (read state exposes only `AggregatedFPV`, 📄 §5 "Read state").
 
 > FIPs#1275 removed the FIL pricing-period vector (`PricePeriod[]`) and the on-chain `FinalizeConversion`: the SRA never receives raw FIL amounts, pricing periods, or print references — `PostVolume` carries only the single USD total (📄 §2.3/§4.2). The PRICE_BAND anchor storage (C6) is likewise gone.
 
@@ -199,19 +215,22 @@ post-binding: now > E(Q) + POST_PERIOD + VERIFICATION_WINDOW     // SubmitShares
 
 - A frozen orchestrator cannot `registerPairs`/`postVolume` (📄 §4.2)
 - "For any quarter whose posting close was during a freeze": FPV is excluded, share is 0 (📄 §4.2)
-- **Snapshot implementation (✏️ ✅ approved, freeze history arrays)**: `OrchestratorInfo` maintains `freezeEpochs`/`unfreezeEpochs` history arrays (one push per freeze/unfreeze execution; governance is low-frequency so the arrays are tiny). Determining whether "the E+POST instant of quarter Q is frozen": do a paired interval search; falling inside `[freezeEpochs[i], unfreezeEpochs[i])` → frozen, otherwise unfrozen. **Derivable at any point in time, independent of call ordering** — SubmitShares/AggregatedFPV results do not depend on when the keeper calls, strictly matching the spec's E+POST snapshot semantics.
+- **Snapshot implementation (✏️ ✅ approved, mirror refactor)**: the E+POST exclusion is a **stored flag** `frozenAtPostEnd` on the orchestrator — set by a freeze in the posting window (E+POST not yet reached), cleared by an unfreeze in the posting window, and **fixed from the verification window onward** (a freeze/unfreeze after E+POST cannot change the already-determined quarter). `frozenSince` (current freeze state) is separate: it serves admission checks and freeze/unfreeze symmetry, and cannot reconstruct the E+POST state across a freeze→unfreeze spanning E+POST (the reason the flag exists). At the mirror advance the flag is snapshotted into the previous-quarter slot (`prevFpv <- frozenAtPostEnd ? 0 : fpv`), because the freeze state of a past E+POST is no longer derivable once the quarter has advanced.
 - **After Remove**: pairs return to unclaimed and can be claimed by other orchestrators via `registerPairs` (📄 §4.2)
-- **Re-admit = fresh identity (✏️ finalized after T10 defect fix)**: `admit` sets `admitted = true` and **resets identity** — clears `successor` (residual alias chain from replace), `frozen = false`, `delete freezeEpochs/unfreezeEpochs` (symmetric with `remove` cleanup). Rationale: if after `replace(old→new)` the old address is re-`admit`ted while a successor remains, the `submitShares` freeze check passes for old itself but the wallet resolves along the residual chain to the frozen new → a frozen orchestrator obtains a share through the resolve chain (violating S5/S7); residual frozen state would also carry over on re-admission. Rejected alternatives: B (make the submitShares freeze check decide after `_resolve(orch)` — violates S5, which requires checking the reporting orchestrator itself; old's legitimate FPV would be dragged down by frozen new, and other functions like aggregatedFPV would be inconsistent), C (forbid re-admit after replace — too restrictive, conflicts with S7 "keep admit simple")
+- **Re-admit = fresh identity (✏️ finalized after T10 defect fix)**: `admit` sets `admitted = true` and **resets identity** — clears `successor` (residual alias chain from replace), `frozenSince = 0`, `frozenAtPostEnd = false`, `fpv = 0`, `prevFpv = 0` (symmetric with `remove` cleanup). Rationale: if after `replace(old→new)` the old address is re-`admit`ted while a successor remains, the `submitShares` freeze check passes for old itself but the wallet resolves along the residual chain to the frozen new → a frozen orchestrator obtains a share through the resolve chain (violating S5/S7); residual frozen state would also carry over on re-admission. Rejected alternatives: B (make the submitShares freeze check decide after `_resolve(orch)` — violates S5, which requires checking the reporting orchestrator itself; old's legitimate FPV would be dragged down by frozen new, and other functions like aggregatedFPV would be inconsistent), C (forbid re-admit after replace — too restrictive, conflicts with S7 "keep admit simple")
 - **After ReassignBinding**: volume is credited to the new orchestrator from the change epoch onward; already-posted quarters are unaffected (📄 §4.2)
 
 #### 2.5.3 SplitRule Share Computation (with largest-remainder method)
 
 ```
 submitShares(Q):
-    1. require after binding (NotBound(q)); require !sharesSubmitted[Q] (AlreadySubmitted, FIPs#1275)
-    2. collect usd_i of non-excluded (admitted and non-frozen) orchestrators
-    3. total = Σ usd_i
-    4. if total == 0: benign no-op — return (no SetShares; existing map stands, 🔍 D1/FIPs#1275)
+    1. require after binding (NotBound(q)); require q + 1 != lastSubmittedQ (AlreadySubmitted, FIPs#1275;
+       lastSubmittedQ stores q+1 so quarter 0 does not collide with the 0 sentinel)
+    2. q is the latest bound quarter: q == activeQ (bound, mirror not advanced) or q == activeQ - 1
+       (advanced). Read the mirror slots: fpv for the active quarter (skip frozenAtPostEnd),
+       prevFpv for the previous quarter (exclusion already fixed at the advance)
+    3. total = totalUsd[q]   // quarter counter, O(1)
+    4. if total == 0: benign no-op — mark submitted and return (no SetShares; existing map stands, 🔍 D1/FIPs#1275)
        else:
          for i: share_i = usd_i * SHARE_TOTAL / total      // floor
          residue = SHARE_TOTAL - Σ share_i                       // 0 <= residue < N
@@ -219,7 +238,7 @@ submitShares(Q):
          // the first residue entries get share_i += 1
          shares = [{wallet_i, share_i}]                          // wallet = orch address (✏️)
     5. drop entries with share_i == 0 (floor division can yield 0 for tiny usds; f02 rejects 0 shares — adapter surfaced by the main-branch mock validation)
-    6. mark sharesSubmitted[Q] = true (CEI), FVMRewards.setShares(SERVICE_STREAM_ID, shares)   // SERVICE_STREAM_ID = 2 (📘 f02-design)
+    6. mark lastSubmittedQ = q + 1 (CEI), FVMRewards.setShares(SERVICE_STREAM_ID, shares)   // SERVICE_STREAM_ID = 2 (📘 f02-design)
 ```
 
 - **Σ shares must be exactly == SHARE_TOTAL (1e18)**, otherwise f02 rejects (📘 f02-design / FVMRewards comment); the largest-remainder method guarantees this exactly (✏️ design derivation; the spec gives no algorithm)
@@ -307,7 +326,7 @@ submitShares(Q):
 
 #### S2 Data Structures (✅ approved)
 
-- **Decision**: 4 ERC-7201 namespaces (`Registry`/`AdmittedLists`/`Quarter`/`Params`) and field layout, each block an independent slot (derived from `keccak256(namespace)`, never colliding). The Quarter namespace previously carried the PRICE_BAND anchor (C6) and `conversionFinalized` — both removed by FIPs#1275 (off-chain conversion); it now holds only the FPV map and the `sharesSubmitted` flag.
+- **Decision**: 4 ERC-7201 namespaces (`Registry`/`AdmittedLists`/`Quarter`/`Params`) and field layout, each block an independent slot (derived from `keccak256(namespace)`, never colliding). The Quarter namespace previously carried the PRICE_BAND anchor (C6) and `conversionFinalized` — both removed by FIPs#1275 (off-chain conversion); the review-#10 mirror refactor then replaced the `fpv` map + `sharesSubmitted` map with the two-slot mirror (`fpv`/`prevFpv` in Registry) + the quarter counter array (`totalUsd`) + `activeQ`/`lastSubmittedQ`.
 - **Rationale**: divided by "data lifecycle × governance ownership" — Registry (long-lived identity, governance domain), AdmittedLists (isolated configuration, governance domain), Quarter (rolling quarterly data, mechanism domain, the only high-frequency write), Params (governance parameters, governance domain); future delegate division maps directly, zero storage migration.
 - **Impact**: storage layout finalized; C6 found a design gap — the PRICE_BAND reference needed a storage field (later placed in the Quarter namespace).
 
@@ -325,7 +344,7 @@ submitShares(Q):
 
 #### S5 Freeze Snapshot (✅ approved)
 
-- **Decision**: `OrchestratorInfo` maintains `freezeEpochs`/`unfreezeEpochs` history arrays (one push per freeze/unfreeze execution); determining "whether the E+POST instant of quarter Q is frozen" does a paired-interval search; falling inside `[freeze[i], unfreeze[i])` → frozen.
+- **Decision**: `OrchestratorInfo` maintains `freezeEpochs`/`unfreezeEpochs` history arrays (one push per freeze/unfreeze execution); determining "whether the E+POST instant of quarter Q is frozen" does a paired-interval search; falling inside `[freeze[i], unfreeze[i])` → frozen. **Superseded by the review-#10 mirror refactor**: the arrays were replaced by the `frozenAtPostEnd` stored flag (set/cleared only before E+POST) + `frozenSince` (current freeze state); at the mirror advance the flag is snapshotted into `prevFpv` (`prevFpv <- frozenAtPostEnd ? 0 : fpv`), because a past E+POST's freeze state is no longer derivable once the quarter has advanced — see §2.5.2.
 - **Rationale**: strictly matches the spec's E+POST snapshot semantics; derivable at any point, independent of call ordering — SubmitShares/AggregatedFPV results do not depend on keeper call timing.
 - **Impact**: E+POST snapshot positive/negative tests (`FrozenAtPostEnd_UnfrozenInWindow_StillExcluded` and `UnfrozenAtPostEnd_FrozenInWindow_StillIncluded`); previously discussed alternatives (current-state determination / bitmap snapshot / single field) rejected.
 
@@ -450,23 +469,24 @@ submitShares(Q):
 | `test/SRATestBase.sol` | Common base: deploy SRA, build Safe owners, register service stream 2, quarterly time utilities, governance helpers | — (not a test) | — |
 | `test/SRAGovernance.t.sol` | Governance flow | 16 | 6 |
 | `test/SRARegistry.t.sol` | Orchestrator registry + freeze + cap | 28 | 3, 5 |
-| `test/SRAQuarter.t.sol` | Quarter state machine + FPV (single USD total, FIPs#1275) | 20 | 2, 7, 11 |
+| `test/SRAQuarter.t.sol` | Quarter state machine + FPV (single USD total, FIPs#1275) | 22 | 2, 7, 11 |
+| `test/SRAggregateMirror.t.sol` | **Aggregate mirror differential tests** (review #10 refactor): mirror pinned to the linear-scan semantics across post / correct / freeze / unfreeze / replace (inheritance) / remove + quarter advance / lagging submit (prevFpv) / exclusion-fixed mirror + historical quarter counter | 9 | 14 (aggregate path) |
 | `test/SRAShares.t.sol` | Share computation + no-op + freeze snapshot + SetShares | 17 | 1, 3, 4, 10, 12 |
 | `test/SRAIntegration.t.sol` | **Integration contract tests** (simulate the SWA gating consumer of aggregatedFPV; pure-view no-divergence, FIPs#1275) | 3 | 11 |
 | `test/SRAOverflowDoS.t.sol` | **Overflow DoS regression tests** (audit V3 — _computeShares overflow; V1/V2 removed with the band/finalize machinery, FIPs#1275) | 2 | 11 (overflow-DoS hardening) |
 | `test/SRAAdversarial.t.sol` | **Adversarial input matrix** (S1, QA system fix): boundary probes of the external write surface — q-window boundaries (future quarter / uint64.max), FPV single-USD-total exact-limit accept / limit+1 reject, zero-address probes, setPricingParams parameter grid, empty-array semantics, multi-orchestrator aggregate bound | 20 | 2, 7, 11 (adversarial layer) |
 | `test/SRAInvariant.t.sol` | **Invariant tests** (P1/A2/A3): handler random operations + 5 persistent invariants | 5 | I1 share conservation / I2 binding uniqueness / I3 governance consistency / A2 freeze-snapshot exclusion / A3 non-zero-total valid map |
 | `test/differential/DifferentialShares.t.sol` | **Differential tests** (t1): Python independent reference model cross-validates the largest-remainder core; aggregation hand-written cases (band differential removed, FIPs#1275) | 4 | 1, 11 (independent reference model) |
-| `test/halmos/QuarterWindowCheck.t.sol` | **State-machine symbolic verification** (blind spot 4 closed): Halmos formally proves parameter-independent quarter-window properties (T2a quarter boundary / T3 constant interval / T4 snapshot-time independence / T5b empty-history boundary); harness in `test/halmos/QuarterWindowHarness.sol` | 4 (halmos, not in the forge suite) | 2, 3, 4 (symbolic verification layer) |
+| `test/halmos/QuarterWindowCheck.t.sol` | **State-machine symbolic verification** (blind spot 4 closed): Halmos formally proves parameter-independent quarter-window properties (T2a quarter boundary / T3 constant interval / T4 snapshot-time independence / T5b empty-history boundary); harness in `test/halmos/QuarterWindowHarness.sol` | 4 (halmos, runs in its own CI workflow halmos.yml) | 2, 3, 4 (symbolic verification layer) |
 
-**117 forge test functions in total** (112 deterministic + 5 invariant), plus 4 Halmos symbolic-verification checks (not in the forge suite); covers all active test strategies in §4.2 + 3 new persistent invariants from P1 + A2/A3 correctness invariants + A2 defect regression + integration contract tests + differential cross-validation + state-machine symbolic verification + overflow-DoS hardening (V3) + audit bound enforcement (B1/C1/E1/E2/F2) + adversarial input matrix (S1). Full suite: 117 SRA + 144 existing = **261 tests** (FIPs#1275 removed the band/finalize/burn suites).
+**303 forge tests in total** (17 suites: quarter state machine / registry / governance / shares / integration / aggregate-mirror / overflow-DoS / adversarial / invariant + the pre-existing non-SRA suites), plus 4 Halmos symbolic-verification checks (own workflow halmos.yml); covers all active test strategies in §4.2 + 3 new persistent invariants from P1 + A2/A3 correctness invariants + A2 defect regression + integration contract tests + differential cross-validation + state-machine symbolic verification + aggregate-mirror differentials (#10) + overflow-DoS hardening (V3) + audit bound enforcement (B1/C1/E1/E2/F2) + adversarial input matrix (S1). FIPs#1275 removed the band/finalize/burn suites.
 
 ### 4.2 Strategy Point Coverage Matrix
 
 | # | Strategy point (design §3) | Test functions | Source |
 |---|----------------------------|----------------|--------|
 | 1 | Share rounding (largest remainder) | `SRAShares.test_SubmitShares_ThreeWayEqual_ExactSum` (3-way)<br>`..._SevenWayEqual_ExactSum` (7-way)<br>`..._SeventeenWayEqual_ExactSum` (17-way, remainder 15)<br>`..._UnevenSplit_Proportional` (30/70) | 🔍 I1 / ✏️ S3 |
-| 2 | Window boundaries (E/E+POST/E+POST+VERIFY ±1) | `SRAQuarter.test_PostVolume_PostingWindow_Success` (E+1)<br>`..._AtQuarterEnd_Reverts` (E strictly less)<br>`..._AtPostEnd_Inclusive` (E+POST inclusive)<br>`..._AfterPostingWindow_Reverts` (E+POST+1)<br>`..._SecondPosting_Reverts` (posted flag)<br>`SRAQuarter.test_CorrectVolume_AtVerifyEnd_Inclusive`<br>`..._AfterVerificationWindow_Reverts` | 🔍 I5 / ✏️ S4 |
+| 2 | Window boundaries (E/E+POST/E+POST+VERIFY ±1) | `SRAQuarter.test_PostVolume_PostingWindow_Success` (E+1)<br>`..._AtQuarterEnd_Reverts` (E strictly less)<br>`..._AtPostEnd_Inclusive` (E+POST inclusive)<br>`..._AfterPostingWindow_Reverts` (E+POST+1)<br>`..._SecondPosting_Reverts` (usd==0 check)<br>`SRAQuarter.test_CorrectVolume_AtVerifyEnd_Inclusive`<br>`..._AfterVerificationWindow_Reverts` | 🔍 I5 / ✏️ S4 |
 | 3 | Freeze semantics | `SRARegistry.test_Freeze_PreventsPostVolume`<br>`..._Unfreeze_RestoresOperations`<br>`..._RegisterPairs_Frozen_Reverts`<br>`..._Remove_ReleasesPairs_CanBeReclaimed`<br>`..._RegisterPairs_AfterReplace_ThirdPartyReverts` (**T6**: third-party pair grab after replace must revert)<br>`SRAShares.test_SubmitShares_FrozenExcluded_ExactSum`<br>`..._FrozenAtPostEnd_UnfrozenInWindow_StillExcluded` (E+POST snapshot)<br>`..._UnfrozenAtPostEnd_FrozenInWindow_StillIncluded` (snapshot counterexample)<br>`SRARegistry.test_Replace_TransfersIdentity`<br>`..._ReassignBinding_ChangesBinding` | 📄 §4.2 + ✅ S5 |
 | 4 | All-zero no-op (FIPs#1275, replacing D1 burn) | `SRAShares.test_SubmitShares_AllZero_NoOp_KeepsMap` (nobody posted)<br>`..._AllFrozen_NoOp_KeepsMap` (all frozen/excluded)<br>**Both assert the share map stands unchanged (no SetShares — SplitRule not evaluated)** | FIPs#1275 |
 | 5 | Cap rejection (D2) | `SRARegistry.test_Admit_AtCapacity_Reverts` (64 full rejects)<br>`..._Admit_RemoveFreesSlot` (Remove frees)<br>`..._Admit_FrozenStillCountsTowardLimit` (freeze does not free) | 🔍 D2 |
@@ -486,13 +506,13 @@ submitShares(Q):
 
 | # | Gap | Added tests (file:line) | Verification point |
 |---|-----|-------------------------|--------------------|
-| **G1** | `setPricingParams`/`getPricingParams` untested | `SRAQuarter:240` `test_SetPricingParams_UpdatesParams_GetReturns`<br>`SRAQuarter:254` `..._NonOwner_Reverts`<br>`SRAQuarter:262` `..._InvalidParams_Reverts` (priceBand > 10000) | parameter management: update takes effect / gating / invalid params |
-| **G2** | 64-full + submitShares combination untested | `SRAShares:304` `test_SubmitShares_AtFullCapacity_SixtyFourRecipients` | all 64 post → map has exactly 64 recipients (mock MAX_RECIPIENTS boundary), 64-way even split with 1e18/64 each, Σ exact |
+| **G1** | `setPricingParams`/`getPricingParams` untested | `SRAQuarter:269` `test_SetPricingParams_UpdatesParams_GetReturns`<br>`SRAQuarter:283` `..._NonOwner_Reverts`<br>`SRAQuarter:291` `..._InvalidParams_Reverts` (priceBand > 10000) | parameter management: update takes effect / gating / invalid params |
+| **G2** | 64-full + submitShares combination untested | `SRAShares:300` `test_SubmitShares_AtFullCapacity_SixtyFourRecipients` | all 64 post → map has exactly 64 recipients (mock MAX_RECIPIENTS boundary), 64-way even split with 1e18/64 each, Σ exact |
 | **G3** | band exact ±20% boundary untested | *(removed with the PRICE_BAND check, FIPs#1275 — no on-chain band arithmetic remains; the tests `SRAQuarter:245...306` were deleted with the mechanism)* | `_checkPriceBand` boundary-inclusive semantics — obsolete (band machinery deleted) |
 | **G4** | MAX_PRICE_PERIODS exactly 32 untested | *(removed with the pricing-period vector, FIPs#1275 — no periods reach the chain; `test_PostVolume_MaxPricePeriods_ExactlyAccepted` deleted)* | on-chain price-period length cap — obsolete |
-| **G5** | multi-quarter share isolation untested | `SRAShares:326` `test_SubmitShares_MultiQuarter_Isolated` | quarter 0 posts A/B → quarter 1 only C posts → quarter 1 map contains only C (no residue), quarter 0 result unaffected |
-| **G6** | failure-path asymmetry | `SRARegistry:326` `test_Replace_AlreadyAdmittedTarget_Reverts` (replace target already admitted)<br>`SRARegistry:342` `test_ReassignBinding_NotAdmittedTarget_Reverts` (target not admitted)<br>`SRARegistry:361` `test_Remove_NotAdmitted_Reverts` (non-orchestrator)<br>`SRARegistry:373` `test_Remove_FrozenOrch_Succeeds` (frozen orchestrator can be removed; implementation does not block) | governance failure branches: errors thrown at the third permissionless execution of the function body |
-| **G7** | no fuzzing | `SRAShares:369` `test_SubmitShares_Fuzz_SumAlwaysExact(uint256,uint256,uint256)` | 3 random usdValues (bounded < 1e30, aligned with the code-enforced MAX_FPV_USD — S3: sampling domain = enforced input domain, not a test-side shrink) → Σ shares always exactly == 1e18 (largest-remainder core invariant, 256 runs) |
+| **G5** | multi-quarter share isolation untested | `SRAShares:322` `test_SubmitShares_MultiQuarter_Isolated` | quarter 0 posts A/B → quarter 1 only C posts → quarter 1 map contains only C (no residue), quarter 0 result unaffected |
+| **G6** | failure-path asymmetry | `SRARegistry:328` `test_Replace_AlreadyAdmittedTarget_Reverts` (replace target already admitted)<br>`SRARegistry:344` `test_ReassignBinding_NotAdmittedTarget_Reverts` (target not admitted)<br>`SRARegistry:363` `test_Remove_NotAdmitted_Reverts` (non-orchestrator)<br>`SRARegistry:375` `test_Remove_FrozenOrch_Succeeds` (frozen orchestrator can be removed; implementation does not block) | governance failure branches: errors thrown at the third permissionless execution of the function body |
+| **G7** | no fuzzing | `SRAShares:400` `test_SubmitShares_Fuzz_SumAlwaysExact(uint256,uint256,uint256)` | 3 random usdValues (bounded < 1e30, aligned with the code-enforced MAX_FPV_USD — S3: sampling domain = enforced input domain, not a test-side shrink) → Σ shares always exactly == 1e18 (largest-remainder core invariant, 256 runs) |
 
 **Implementation issue found**: while writing the G1 tests it was found that the reference updates with each qualifying print (C6 semantics: the last one becomes the new reference) — the "new band applies" test was accordingly changed to directly verify that a value accepted under the old band is rejected after the band change (+20% over-band at band 10%, boundary at band 20%), avoiding reference-update interference with the assertion. (Later superseded by the anchored-reference semantics of deviation-D alignment, §4.3.9.)
 
@@ -527,7 +547,7 @@ submitShares(Q):
 | **CV4** | `admit` AlreadyAdmitted (346) | `SRARegistry` `test_Admit_AlreadyAdmitted_Reverts` | re-admitting the same address rejected (G2 only tested AtCapacity full) |
 | **CV5** | `freeze`/`unfreeze` four-way failure branches (371/372/381/382) | `SRARegistry` `test_Freeze_NotAdmitted_Reverts` / `test_Freeze_AlreadyFrozen_Reverts`<br>`test_Unfreeze_NotAdmitted_Reverts` / `test_Unfreeze_NotFrozen_Reverts` | NotAdmitted / AlreadyFrozen / NotFrozen gating failure paths |
 | **CV6** | `replace` NotAdmitted(oldOrch) (396) | `SRARegistry` `test_Replace_OldNotAdmitted_Reverts` | old address not admitted rejected (G6 only tested the target-already-admitted reverse branch) |
-| **CV7** | `aggregatedFPV` unposted continue (558) / `orchestratorCount` never called (596-597) | `SRAQuarter` `test_AggregatedFPV_UnpostedOrch_Excluded`<br>`SRARegistry` `test_OrchestratorCount_ReflectsAdmissions` | skip when some orchestrators did not post (!posted continue); read-only view count consistent with admittedCount |
+| **CV7** | `aggregatedFPV` unposted continue / `orchestratorCount` never called | `SRAQuarter` `test_AggregatedFPV_UnpostedOrch_Excluded`<br>`SRARegistry` `test_OrchestratorCount_ReflectsAdmissions` | skip when some orchestrators did not post (usd==0 continue, review #7); read-only view count consistent with admittedList.length (review #1) |
 
 **Implementation issue found**: no implementation defect was found during the closure (all new tests went Green directly, verifying existing behavior). Also fixed in passing the P1-leftover fmt difference in `test/SRAInvariant.t.sol` (`forge fmt`, not a semantic change), keeping the whole repo's `forge fmt --check` clean.
 
@@ -539,16 +559,16 @@ submitShares(Q):
 | # | Blind spot | Added tests | Verification point |
 |---|------------|-------------|--------------------|
 | **A1** | `SetSharesFailed` system-call failure never tested (mock had no failure-injection path) | `SRAShares` `test_SubmitShares_SetSharesFailed_Reverts` | mock adds a `failSetShares` failure-injection switch (`mockFailSetShares`) → `_setShares` unconditionally returns USR_FORBIDDEN → submitShares reverts `SetSharesFailed(USR_FORBIDDEN)`; with the switch off, a normal submit in the same quarter succeeds (control, proving the failure comes only from injection and SRA state is not polluted) |
-| **A2** | the 3 invariants did not cover the "freeze snapshot" semantics (frozen-at-E+POST shares always 0, the design's core security mechanism) | `SRAInvariant` `invariant_FrozenAtPostEnd_ExcludedFromShares` | handler adds freeze-interval tracking (`_freezeAt`/`_unfreezeAt`, aligned with the implementation's `freezeEpochs`/`unfreezeEpochs`: freeze/unfreeze push, remove delete, replace deep-copy) → active orchestrators frozen at the POST instant of the latest submit quarter (**the address itself**; the implementation's `_frozenAtPostEnd continue` excludes that orchestrator, producing no wallet) must not appear in the share map |
+| **A2** | the 3 invariants did not cover the "freeze snapshot" semantics (frozen-at-E+POST shares always 0, the design's core security mechanism) | `SRAInvariant` `invariant_FrozenAtPostEnd_ExcludedFromShares` | handler tracks freeze intervals (`_freezeAt`/`_unfreezeAt` — semantically the implementation's `frozenAtPostEnd` flag: an E+POST inside `[freeze, unfreeze)` ⇔ the flag was set before E+POST and not cleared before it) → active orchestrators frozen at the POST instant of the latest submit quarter (**the address itself**; the implementation's frozen-flag `continue` excludes that orchestrator, producing no wallet) must not appear in the share map |
 | **A3** | the all-zero quarter branch had no invariant verification (total==0 → benign no-op, FIPs#1275 replacing D1 burn) | `SRAInvariant` `invariant_NonZeroTotal_ValidShareMap` | reads `sra.fpvOf(q, orch).usd` directly (**same data source as submitShares' traversal**) → when Σ of non-frozen-with-usd>0 at POST == 0, submitShares is a benign no-op (no SetShares; the map stands, covered by the SRAShares unit tests); when Σ>0 → the map is a non-empty subset of the active orchestrators, all shares non-zero (trimmed of 0-share entries) |
 | **E1** | no gas regression baseline | `.gas-snapshot` (generated by `forge snapshot`) | full-suite gas snapshot, preventing future gas regressions |
 
 **Key handler↔implementation alignment points** (confirmed while writing A2/A3; all handler state tracking, not implementation bugs):
-1. **Freeze-interval pairing**: `_isFrozenAtHandled` replicates the implementation's `_isFrozenAt` half-open `[freeze, unfreeze)` interval determination (already-unfrozen intervals `continue` to the next)
-2. **replace deep-copy**: the implementation `replace` fully overwrites `orchestrators[newOrch]` (incl. freezeEpochs/unfreezeEpochs arrays) — the handler must deep-copy the freeze history, otherwise A2's determination for post-replace identity transfers diverges
+1. **Freeze-interval pairing**: `_isFrozenAtHandled` determines E+POST membership via the half-open `[freeze, unfreeze)` interval — semantically the implementation's `frozenAtPostEnd` flag (set before E+POST and not cleared before it ⇔ E+POST inside the interval); a freeze after E+POST does not set the flag for that quarter, matching the interval test (E+POST before the freeze start)
+2. **replace deep-copy**: the implementation `replace` fully overwrites `orchestrators[newOrch]` (incl. `frozenSince`/`frozenAtPostEnd`/`fpv`/`prevFpv` — the new identity inherits the frozen state and the contribution) — the handler must mirror the copy, otherwise A2's determination for post-replace identity transfers diverges
 3. **remove clears**: the implementation `remove` `delete`s the freeze arrays — the handler mirrors the clearing
-4. **admit identity reset**: the implementation `admit` **resets** the freeze history and alias chain (semantics after the A2 defect fix: re-admit = fresh identity, clears successor/frozen/freezeEpochs/unfreezeEpochs) — the handler mirrors the cleanup (see §4.3.5)
-5. **freeze set uses the address itself**: the implementation's `_frozenAtPostEnd continue` excludes the orchestrator **itself** (produces no wallet) — the handler pushes the orch address into the freeze set, not `resolve(orch)` (in a replace scenario resolve may point to an unfrozen successor, causing false positives)
+4. **admit identity reset**: the implementation `admit` **resets** the freeze state and alias chain (semantics after the A2 defect fix: re-admit = fresh identity, clears successor/frozenSince/frozenAtPostEnd/fpv/prevFpv) — the handler mirrors the cleanup (see §4.3.5)
+5. **freeze set uses the address itself**: the implementation's frozen-flag `continue` excludes the orchestrator **itself** (produces no wallet) — the handler pushes the orch address into the freeze set, not `resolve(orch)` (in a replace scenario resolve may point to an unfrozen successor, causing false positives)
 6. **usd same-source read**: the fuzzer's `vm.roll` can rewind time, constructing a pseudo-timeline where "correctVolume/postVolume write after submitShares" — here the implementation's `usd` keeps the bound value and is not recomputed (no on-chain finalize exists since FIPs#1275). The handler does not track usd manually; it reads `sra.fpvOf(q, orch).usd` directly, exactly matching submitShares' traversal
 
 #### 4.3.5 A2 Real Defect Regression Registry (94 → 96 tests)
@@ -602,7 +622,7 @@ For fresh addresses admit is unaffected (fields are already empty); rejected opt
 **Case generation**: an independent Python reference model (seed=42) → `test/differential/DifferentialCases.sol`
 (AUTO-GENERATED, committed for CI reproducibility; harness in `test/differential/DifferentialSharesHarness.sol`).
 
-#### 4.3.8 State-Machine Symbolic Verification Registry (blind spot 4 closed, halmos not in the forge suite)
+#### 4.3.8 State-Machine Symbolic Verification Registry (blind spot 4 closed, halmos in its own CI workflow)
 
 > Formal verification for the quarter-window determination (previously `_computeShares` had a Halmos symbolic proof but the windows did not).
 > Run: `halmos --contract QuarterWindowCheck --loop 64 --no-test-constructor --solver-timeout-branching 2000 --solver-timeout-assertion 60000`
@@ -611,10 +631,10 @@ For fresh addresses admit is unaffected (fields are already empty); rejected opt
 |---|-------|--------------------------------------------|--------|
 | **T2a** | `check_T2a_QuarterEndNotInPosting` | now = E_q → ¬posting (posting is left-open; E_q belongs to the previous quarter's binding tail) | ✅ PASS |
 | **T3** | `check_T3_QuarterProgression` | qEnd(q+1) − qEnd(q) == qEnd(1) − qEnd(0) (equal quarter spacing, no cross-quarter gaps) | ✅ PASS |
-| **T4** | `check_T4_SnapshotTimeInvariant` | `_frozenAtPostEnd` is independent of the calling block.number (S5 anti-timing-game) | ✅ PASS |
-| **T5b** | `check_T5b_IsFrozenAtEmpty` | no freeze history → never frozen at any epoch (empty-array boundary) | ✅ PASS |
+| **T4** | ~~`check_T4_SnapshotTimeInvariant`~~ | `_frozenAtPostEnd` is independent of the calling block.number (S5 anti-timing-game) | **removed with the mirror refactor** — the function no longer exists (E+POST exclusion is a stored flag; the snapshot semantics is covered by the `FrozenAtPostEnd_UnfrozenInWindow_StillExcluded` / `UnfrozenAtPostEnd_FrozenInWindow_StillIncluded` dynamic tests) |
+| **T5b** | ~~`check_T5b_IsFrozenAtEmpty`~~ | no freeze history → never frozen at any epoch (empty-array boundary) | **removed with the mirror refactor** — `_isFrozenAt` no longer exists (frozen state is the single `frozenSince` field) |
 
-**4/4 PASS**. The original proposition set T1 (full coverage + mutual exclusion) / T5 (interval search vs mathematical definition) / T6 (pairwise mutual exclusion) was **downgraded due to halmos 0.1.13 tool limits** (probe experiments confirmed): ① immutables become symbolic after skipping the constructor (window constants have no concrete values) → absolute boundary membership cannot be verified; ② `vm.warp` does not work on symbolic parameters (block.number cannot be symbolized) → universal verification of completeness relying on `currentEpoch()` is infeasible; ③ storage array element reads after push are wrong (length correct but elements symbolic) → freeze-interval search cannot be verified with storage-preset data. The downgraded propositions are covered by dynamic tests: window boundary ±1 on both sides 8 cases (SRAQuarter.t.sol), freeze/unfreeze in both directions + invariant A2 random freeze-history exclusion, 100% line coverage with no unexecuted paths — blind spot 4 is substantially closed within the tool's capability.
+**2/2 PASS** (T2a/T3 window-boundary + quarter-progression; the former T4 freeze-snapshot and T5b empty-history propositions were removed with the mirror refactor — `_frozenAtPostEnd`/`_isFrozenAt` no longer exist, the E+POST exclusion is a stored flag; the snapshot semantics is covered by dynamic tests). The original proposition set T1 (full coverage + mutual exclusion) / T5 (interval search vs mathematical definition) / T6 (pairwise mutual exclusion) was **downgraded due to halmos 0.1.13 tool limits** (probe experiments confirmed): ① immutables become symbolic after skipping the constructor (window constants have no concrete values) → absolute boundary membership cannot be verified; ② `vm.warp` does not work on symbolic parameters (block.number cannot be symbolized) → universal verification of completeness relying on `currentEpoch()` is infeasible; ③ storage array element reads after push are wrong (length correct but elements symbolic) → freeze-interval search cannot be verified with storage-preset data. The downgraded propositions are covered by dynamic tests: window boundary ±1 on both sides 8 cases (SRAQuarter.t.sol), freeze/unfreeze in both directions + invariant A2 random freeze-history exclusion, 100% line coverage with no unexecuted paths — blind spot 4 is substantially closed within the tool's capability.
 
 > **Evidence conditions (S3 annotation)** — the symbolic domain here is the **weak form** "arbitrary window config (immutables symbolized) + q small-domain enumeration + block.number = 0" (tool limits ①/②); it is **not** a universal-domain proof. The strong boundary semantics (now = E / E+1 / E+P / E+P+1 / E+P+V / E+P+V+1) are covered by the dynamic ±1 test set. The `_computeShares` largest-remainder Halmos checks were **removed** (FixedU18 assembly ops not symbolizable — see §5.10); the algorithm properties are covered by the differential suite (bit-exact fixed cases) and invariant fuzz (SumShares conservation). The enforced absolute domain (MAX_FPV_USD = 1e30) is covered independently by the §5.5 domain-math bounds (per-orch usd × 1e18 ≤ 1e48 / total ≤ 6.4e31 ≪ 2^256), whose premise is now enforced in code (the single `MAX_FPV_USD` bound at both input entries).
 
@@ -659,7 +679,7 @@ Final: SRA deterministic **118/118 Green** (SRAQuarter 44 + SRARegistry 28 + SRA
 
 **S2 — security-claim → code-enforcement map** (§5.1 table): every "Safe"/"Conditionally safe" conclusion now cites the enforcing code point (require / mechanism); a claim without an enforcement reference fails review. Maps all 8 categories (e.g. Integer overflow → the single `MAX_FPV_USD` bound @ postVolume + correctVolume; DoS caps → `MAX_PAIRS(64)` / `MAX_ALLOWLIST(64)` / `MAX_ORCHESTRATORS(64)`).
 
-**S3 — evidence-application-condition annotation**: the fuzz sampling domain `(0,1e30)` is re-annotated as **equal to the code-enforced MAX_FPV_USD** (not a test-side shrink — `SRAShares:369` + `SRAInvariant:255,268`); the largest-remainder algorithm properties are covered by the differential suite (bit-exact fixed cases) + invariant fuzz, with the enforced absolute domain's arithmetic safety independently covered by the §5.5 domain-math bounds (docs §4.3.8 S3 note).
+**S3 — evidence-application-condition annotation**: the fuzz sampling domain `(0,1e30)` is re-annotated as **equal to the code-enforced MAX_FPV_USD** (not a test-side shrink — `SRAShares:400` + `SRAInvariant:255,268`); the largest-remainder algorithm properties are covered by the differential suite (bit-exact fixed cases) + invariant fuzz, with the enforced absolute domain's arithmetic safety independently covered by the §5.5 domain-math bounds (docs §4.3.8 S3 note).
 
 **S4 — threat model matrix** (§5.13): all 15 external write functions × (malicious orchestrator / compromised owner) → impact → mitigation → sufficiency; every function is closed either by unanimous dual-Safe governance or by code-enforced input bounds + timing gates.
 
@@ -709,10 +729,8 @@ forge test --match-contract SRAInvariant
 forge test --match-contract DifferentialShares
 
 # --- symbolic verification (halmos) ---
-# 不进 CI（决策，见 .github/workflows/test.yml 注释）：需独立 `forge build --ast` 一遍(~2min)
-# + SMT 求解 ~3min(QuarterWindowCheck)，且与 via-IR 字节码瘦身
-# (EIP-170) 冲突——harness 继承主合约但不走构造器，via-IR 下 immutable 未赋值直接编译失败。
-# 仅在此类变更时手动跑：存储布局 / 数值计算 / 窗口边界逻辑改动，或每次发布前。
+# 已进 CI：独立 workflow (.github/workflows/halmos.yml)，不阻塞主 test CI；
+# 本地手动运行路径（存储布局 / 数值计算 / 窗口边界逻辑改动时，或每次发布前）：
 # 前置: forge 1.7+ 默认不为 test 合约输出 AST, 而 halmos 从 out/ 读取 ast 字段 —— 先 `forge build --ast`
 # (若跳过此步, halmos 报 "KeyError: 'ast'"; 自 halmos 0.1.13 起 extra_output=["ast"] 已被 forge 移除, 改为 --ast flag)
 forge build --ast
@@ -745,14 +763,14 @@ forge coverage --match-contract SRA      # SRA line coverage 100% (branch 67% is
 
 | # | Category | Conclusion | Key basis | Code-enforcement point |
 |---|----------|------------|-----------|------------------------|
-| 1 | Reentrancy | ✅ Safe | no value transfer; the only external call is an fvm precompile with no callback surface | no value transfer (no `payable`/`call`/`transfer` anywhere in `src/ServiceRewardsActor.sol`); the only external call is `FVMRewards.setShares` (fvm precompile, no callback), `submitShares:577` |
-| 2 | Denial of Service (DoS) | ⚠️ Conditionally safe | all traversals have hard caps (64); freeze-history arrays and the replace chain are theoretical growth points | `registerPairs` `pairs.length <= MAX_PAIRS(64)` `:329`; `setAdmittedLists` `length <= MAX_ALLOWLIST(64)` `:492`; `admit` `admittedCount < MAX_ORCHESTRATORS(64)` `:395`; `postVolume`/`correctVolume` take a single USD value — no period array to traverse (FIPs#1275). Freeze-history / replace-chain growth is unbounded by design (needs n unanimous governance actions to construct — theoretical only, no code cap) |
-| 3 | Access control | ✅ Safe | governance dual-Safe unanimous + hold; orchestrator self-operations gated; constructor validates Safe proxy | `unanimous`/`unanimousNoHold` modifiers gate every governance method (`admit:395` / `remove:410` / `freeze:424` / `unfreeze:434` / `replace:447` / `reassignBinding:473` / `replaceOwner:484` / `setAdmittedLists:492` / `setPricingParams:520` / `correctVolume:545`); `_veto` requires `msg.sender.isOwner()` (cancelPending:533); constructor `newOwner.isProbablyASafe()` (E2 `:256`) |
+| 1 | Reentrancy | ✅ Safe | no value transfer; the only external call is an fvm precompile with no callback surface | no value transfer (no `payable`/`call`/`transfer` anywhere in `src/ServiceRewardsActor.sol`); the only external call is `FVMRewards.setShares` (fvm precompile, no callback), `submitShares:547` |
+| 2 | Denial of Service (DoS) | ⚠️ Conditionally safe | all traversals have hard caps (64); the replace chain is a theoretical growth point | `registerPairs` `pairs.length <= MAX_PAIRS(64)` `:262`; `setAdmittedLists` `length <= MAX_ALLOWLIST(64)` `:451`; `admit` `admittedList.length < MAX_ORCHESTRATORS(64)` `:324`; `postVolume`/`correctVolume` take a single USD value — no period array to traverse (FIPs#1275). Freeze determination is O(1) (stored flag, mirror refactor); replace-chain growth is unbounded by design (needs n unanimous governance actions to construct — theoretical only, no code cap) |
+| 3 | Access control | ✅ Safe | governance dual-Safe unanimous + hold; orchestrator self-operations gated; constructor validates Safe proxy | `unanimous`/`unanimousNoHold` modifiers gate every governance method (`admit:324` / `remove:346` / `freeze:369` / `unfreeze:387` / `replace:408` / `reassignBinding:432` / `replaceOwner:443` / `setAdmittedLists:451` / `setPricingParams:480` / `correctVolume:504`); `_veto` requires `msg.sender.isOwner()` (cancelPending:492); constructor `newOwner.isProbablyASafe()` (E2 `:146`) |
 | 4 | Integer overflow | ✅ Safe | 0.8.x checked arithmetic fully on; **input-domain bound enforced at the entries** (single `MAX_FPV_USD=1e30`, audit V3 fix); the enforced absolute domain's arithmetic safety is covered by the §5.5 domain-math bounds (S3: proof premise = code-enforced domain) | the single `MAX_FPV_USD` bound at **both** input entries — `postVolume` and `correctVolume`; `_computeShares` chain: per-orch usd × 1e18 ≤ 1e48, total ≤ 6.4e31 ≪ 2^256 (§5.5); checked arithmetic (0.8.36 default) |
 | 5 | Encoding and boundaries (ABI/CBOR) | ⚠️ Conditionally safe | input side protected by the ABI decoder; output side bounded CBOR; wire contract pending f02 implementation check | input side: Solidity ABI decoder (compile-time, rejects malformed calldata); output side: bounded CBOR in f02 mock (`test/mocks/FVMRewardActor.sol`); wire contract vs real f02 implementation is a protocol-layer premise (no contract-layer code can enforce it) |
-| 6 | Precision issues | ✅ Safe | floor + largest-remainder Σ==1e18; conservation/monotonicity/floor bound covered by the differential suite (bit-exact) + invariant fuzz (SumShares) — the Halmos symbolic checks were removed with the FixedU18 adoption (§5.10) | `_computeShares` largest-remainder method `:735` (Σ shares == SHARE_TOTAL exactly, remainder descending + residue top-ups); shares depend only on USD ratios — no rate arithmetic on chain (FIPs#1275) |
-| 7 | Governance path | ✅ Safe | three-phase + dual Safe + event traceability; re-admit semantics closed after T10 | three-phase `unanimous` modifier (approve/approve/hold → permissionless execution, `UnanimousGovernance.sol`); re-admit identity reset in `admit:395` (clears successor/frozen/freezeEpochs — T10 A2 fix) |
-| 8 | Front-running | ✅ Safe | E+POST snapshot semantics independent of keeper timing; permissionless triggers have no privilege and no MEV | `_frozenAtPostEnd` derives the frozen snapshot from the freeze-history arrays at the E+POST instant (`:303`), independent of when the caller invokes submitShares/aggregatedFPV; permissionless `submitShares:577` / view `aggregatedFPV:635` have no privileged action |
+| 6 | Precision issues | ✅ Safe | floor + largest-remainder Σ==1e18; conservation/monotonicity/floor bound covered by the differential suite (bit-exact) + invariant fuzz (SumShares) — the Halmos symbolic checks were removed with the FixedU18 adoption (§5.10) | `_computeShares` largest-remainder method `:683` (Σ shares == SHARE_TOTAL exactly, remainder descending + residue top-ups); shares depend only on USD ratios — no rate arithmetic on chain (FIPs#1275) |
+| 7 | Governance path | ✅ Safe | three-phase + dual Safe + event traceability; re-admit semantics closed after T10 | three-phase `unanimous` modifier (approve/approve/hold → permissionless execution, `UnanimousGovernance.sol`); re-admit identity reset in `admit` (clears successor/frozenSince/frozenAtPostEnd/fpv/prevFpv — T10 A2 fix) |
+| 8 | Front-running | ✅ Safe | E+POST snapshot semantics independent of keeper timing; permissionless triggers have no privilege and no MEV | `frozenAtPostEnd` is a stored flag fixed from the verification window onward (set/cleared only before E+POST), independent of when the caller invokes submitShares/aggregatedFPV; permissionless `submitShares` / view `aggregatedFPV` have no privileged action |
 
 **Overall conclusion**: the SRA is a **value-transfer-free** pure state machine (writes f02 shares); the attack surface concentrates on **governance authority** and **data correctness**.
 The governance surface is strongly constrained by dual-Safe unanimous + hold; data correctness is assured by 100% line-coverage tests + 5 invariants + differential cross-validation + quarter-window symbolic verification + Slither static analysis
@@ -780,13 +798,13 @@ All residual risks are **theoretical boundaries** or **protocol-layer premises**
 
 - **Traversals have hard caps**:
   - `admittedList` ≤ 64 (`MAX_ORCHESTRATORS`, D2; `admit` rejects when full, only `remove` releases) → `submitShares`/`aggregatedFPV` traversals O(64) bounded; `_computeShares` remainder top-up O(n²) = 4096 iterations bounded (§2.5.3).
-  - `_isFrozenAt` freeze-interval search O(freeze count): each freeze/unfreeze requires two governance votes + hold; frequency is naturally constrained by governance cadence. (The `filPeriods.length ≤ MAX_PRICE_PERIODS` bound was removed with the pricing-period vector, FIPs#1275 — no period loops remain.)
+  - freeze determination is O(1) — the mirror refactor replaced the freeze-interval search with the stored `frozenAtPostEnd` flag + `frozenSince` single field (no arrays). (The `filPeriods.length ≤ MAX_PRICE_PERIODS` bound was removed with the pricing-period vector, FIPs#1275 — no period loops remain.)
 - **No externally expandable input**: `admittedList` can only be modified by governance `admit`/`replace`; pair-binding uniqueness is guaranteed by `registerPairs` (checked along the resolve chain after the T6 fix).
 - **Covered by tests**: 64-full rejection / 64-all-posted map boundary (G2), share-Σ fuzz (G7), `orchestratorCount` view (CV7).
 
 **Residual risk (theoretical growth points, not exploitable vulnerabilities)**:
 
-1. **Freeze-history arrays have no hard cap**: `freezeEpochs`/`unfreezeEpochs` push one entry per governance freeze/unfreeze; array length grows linearly with governance operations; `_isFrozenAt` and `_isFrozenAtHandled` (invariant handler) are O(array length). Constrained by the governance consensus threshold, decades of operation yield tens of entries (O(tens) negligible); if governance frequency becomes extremely high, an array cap could be evaluated.
+1. ~~**Freeze-history arrays have no hard cap**~~ **resolved by the mirror refactor**: `freezeEpochs`/`unfreezeEpochs` were removed — the E+POST exclusion is the stored `frozenAtPostEnd` flag, current freeze state is the single `frozenSince` field; there is no freeze-history growth point (the replace chain remains the only theoretical growth point, see 2).
 2. **Replace-chain length has no hard cap**: `_resolve` resolves along the successor chain with a while loop. Chain formation requires one governance `replace` per step (old becomes an alias, admitted=false; chain-intermediate nodes cannot be removed or replaced), so chain length is naturally constrained by governance frequency; but there is no explicit cap, and under extreme governance abuse the resolve cost in `submitShares` grows linearly. **Recommended: future reviewers evaluate adding a chain-length cap** (currently constrained by governance cadence, not urgent).
 
 ### 5.4 Access Control
@@ -880,7 +898,7 @@ The V1 (PRICE_BAND anchor pollution) and V2 (finalizeConversion overflow) analys
 - **unanimousNoHold**: the second vote executes immediately (correctVolume; the window is the hold, D3).
 - **_veto**: either Safe alone cancels a pending task (`cancelPending`, covered by `Veto_CancelsPendingAdmit`).
 - **Task mutual exclusion**: parked governance targets are mutually exclusive (I3; `invariant_GovernanceTasks_Consistent` persistently verifies parked-not-landed / executed-clears-bitmask).
-- **T10 defect closure**: `admit` identity reset (clears successor/frozen/freezeEpochs/unfreezeEpochs) — the boundary semantics of governance operations (replace→re-admit) are closed, guarded by 2 deterministic regression tests (R1/R2) + the A2 invariant (tests §4.3.5).
+- **T10 defect closure**: `admit` identity reset (clears successor/frozenSince/frozenAtPostEnd/fpv/prevFpv) — the boundary semantics of governance operations (replace→re-admit) are closed, guarded by 2 deterministic regression tests (R1/R2) + the A2 invariant (tests §4.3.5).
 - **Timelock constant**: `SRA_CANCEL_HOLD` compile-time constant (constructor config; S6 const-ification reduces the governance attack surface).
 
 **Residual risk/premises**:
@@ -894,7 +912,7 @@ The V1 (PRICE_BAND anchor pollution) and V2 (finalizeConversion overflow) analys
 
 **Basis**:
 
-- **E+POST snapshot semantics (S5)**: freeze determination uses the `freezeEpochs`/`unfreezeEpochs` history arrays + paired-interval search (`_frozenAtPostEnd`/`_isFrozenAt`) — **derivable at any point, independent of keeper call timing** (§2.5.2). `submitShares` results are deterministic; there is no "submit before the freeze" or "delay until after unfreeze" front-running window; snapshot positive/negative tests (`FrozenAtPostEnd_UnfrozenInWindow_StillExcluded` / `UnfrozenAtPostEnd_FrozenInWindow_StillIncluded`) + the A2 invariant cover it.
+- **E+POST snapshot semantics (S5)**: the E+POST exclusion is the stored `frozenAtPostEnd` flag — set by a freeze in the posting window, cleared by an unfreeze in the posting window, **fixed from the verification window onward** (a freeze/unfreeze after E+POST cannot change the determined quarter); at the mirror advance the flag is snapshotted into `prevFpv` (`prevFpv <- frozenAtPostEnd ? 0 : fpv`), because a past E+POST's freeze state is no longer derivable once the quarter has advanced (§2.5.2). `submitShares` results are deterministic; there is no "submit before the freeze" or "delay until after unfreeze" front-running window; snapshot positive/negative tests (`FrozenAtPostEnd_UnfrozenInWindow_StillExcluded` / `UnfrozenAtPostEnd_FrozenInWindow_StillIncluded`) + the A2 invariant cover it.
 - **Permissionless triggers have no privilege**: `submitShares` callable by anyone with identical results (a successful non-zero submit settles the quarter; a re-submit reverts `AlreadySubmitted`, an all-zero quarter is a benign no-op — the map is deterministic and timing-independent) — zero front-running gain, no MEV.
 - **Pure-view read (FIPs#1275)**: `aggregatedFPV` is a pure view after binding — it only sums the bound USD values and triggers nothing (no on-chain finalize exists since the FIL→USD conversion moved off-chain); the result is deterministic and independent of call timing, so it cannot be manipulated by front-running.
 - **PRICE_BAND anchored reference (obsolete — FIPs#1275)**: the band machinery (anchor storage, `_checkPriceBand`) was deleted with the off-chain conversion; the FIL pricing rule (incl. MIN_LOT/PRICE_BAND) now governs only the off-chain indexer each orchestrator applies before posting, not an on-chain computation.
@@ -913,7 +931,7 @@ The V1 (PRICE_BAND anchor pollution) and V2 (finalizeConversion overflow) analys
 
 #### State-machine verification (quarter windows): 4/4 PASS
 
-- Target: `test/halmos/QuarterWindowCheck.sol` — 4 parameter-independent propositions (T2a/T3/T4/T5b), see §4.3.8.
+- Target: `test/halmos/QuarterWindowCheck.t.sol` — 4 parameter-independent propositions (T2a/T3/T4/T5b), see §4.3.8.
 - Note: the `_computeShares` symbolic checks (largest-remainder) were **removed** — the FixedU18 operators are
   assembly `div`/`mul` and produce SMT constraints the solver cannot discharge under symbolic execution
   (timeouts / revert-all; probe experiments confirmed). The largest-remainder properties remain covered by the
@@ -929,13 +947,13 @@ The V1 (PRICE_BAND anchor pollution) and V2 (finalizeConversion overflow) analys
 | # | Defect | Root cause | Fix | Regression guard |
 |---|--------|------------|-----|------------------|
 | **T6** | `registerPairs` bypasses binding uniqueness | the AlreadyBound check uses `_isAdmitted(current)` instead of `_resolve(current)` — after replace the binding still points to the old address (admitted=false), so a third party can grab the binding pair | 1-line fix `_isAdmitted(_resolve(current))` | `test_RegisterPairs_AfterReplace_ThirdPartyReverts` + `invariant_OneBindingPerPair` |
-| **T10 (A2)** | a frozen orchestrator obtains a share through the resolve chain | `replace(old→new)` sets `old.successor = new` → re-`admit(old)` leaves successor residual → `submitShares`'s freeze check targets old itself (not frozen, passes) but the wallet resolves to the frozen new | `admit` identity reset (clears successor/frozen/freezeEpochs/unfreezeEpochs, symmetric with remove cleanup); invariant handler synced | R1/R2 regression + A2 invariant (exposed by random failure at t7/t8 acceptance; stable for 2 rounds after the fix) |
+| **T10 (A2)** | a frozen orchestrator obtains a share through the resolve chain | `replace(old→new)` sets `old.successor = new` → re-`admit(old)` leaves successor residual → `submitShares`'s freeze check targets old itself (not frozen, passes) but the wallet resolves to the frozen new | `admit` identity reset (clears successor/frozenSince/frozenAtPostEnd/fpv/prevFpv, symmetric with remove cleanup); invariant handler synced | R1/R2 regression + A2 invariant (exposed by random failure at t7/t8 acceptance; stable for 2 rounds after the fix) |
 
 #### Same-pattern residual risk checkpoints (for future reviewers)
 
-1. **remove then re-admit**: ✅ safe (double protection) — `remove` already clears successor/frozen/freeze history, `admit` resets again; semantics = fresh identity.
+1. **remove then re-admit**: ✅ safe (double protection) — `remove` already clears successor/frozenSince/frozenAtPostEnd/fpv/prevFpv, `admit` resets again; semantics = fresh identity.
 2. **replace chain length**: ⚠️ theoretical DoS — `_resolve` resolves along the successor chain with a while loop; chain length has no hard cap (naturally constrained by governance frequency); recommend evaluating a chain-length cap (see §5.3).
-3. **freeze × replace interaction**: ✅ semantics defined — `replace` copies old's frozen state and freeze history to new (identity transfer, covered by `test_Replace_TransfersIdentity`); frozen state follows the identity, consistent with S5 snapshot semantics.
+3. **freeze × replace interaction**: ✅ semantics defined — `replace` copies old's frozen state (`frozenSince`/`frozenAtPostEnd`) and contribution slots (`fpv`/`prevFpv`, contribution inherited by the new identity) to new (identity transfer, covered by `test_Replace_TransfersIdentity`); frozen state follows the identity, consistent with S5 snapshot semantics.
 4. **replace then re-admit (T10 main defect pattern)**: ✅ fixed — `admit` identity reset cuts the residual chain; regression tests R1/R2 guard it.
 5. **freeze-history array growth**: ⚠️ theoretical growth point (see §5.3), constrained by governance frequency; current magnitude negligible.
 
@@ -963,14 +981,14 @@ The V1 (PRICE_BAND anchor pollution) and V2 (finalizeConversion overflow) analys
 |----------|--------------|--------|------------|-------------|
 | `registerPairs` | malicious orchestrator | binding spam / pair squatting (uniqueness keeps 1-pair-1-owner) | `MAX_PAIRS(64)` batch bound + `NotAdmitted`/`NotFrozen` gates; `AlreadyBound` uniqueness; pairs claimable after Remove | ✅ (data hygiene; no value at stake) |
 | `postVolume` | malicious orchestrator | extreme FPV → overflow DoS (V3) | single `MAX_FPV_USD` bound at entry; `NotAdmitted`/`NotFrozen` gates; `AlreadyPosted` once-per-quarter | ✅ (the band machinery was removed with FIPs#1275 — S1 adversarial suite locks the remaining edges) |
-| `admit` / `remove` | compromised owner | arbitrary orchestrator admission/removal | unanimous dual-Safe + hold (3-phase); `MAX_ORCHESTRATORS(64)`; re-admit identity reset (T10) | ✅ (needs both Safe keys — private-key security is a protocol premise) |
-| `freeze` / `unfreeze` | compromised owner | suspend/restore orchestrator; freeze keeps slot (D2) | unanimous + hold; freeze-history arrays enable `_frozenAtPostEnd` snapshot | ✅ |
+| `admit` / `remove` | compromised owner | arbitrary orchestrator admission/removal | unanimous dual-Safe + hold (3-phase); `MAX_ORCHESTRATORS(64)`; re-admit identity reset (T10); **remove timing guard (spec §3.2/§4.4)**: `PendingShares(q)` reverts while the latest bound quarter awaits its share map — no removal can bind between close-of-posting and SubmitShares, keeping the submitted map consistent with the quarter counter | ✅ (needs both Safe keys — private-key security is a protocol premise) |
+| `freeze` / `unfreeze` | compromised owner | suspend/restore orchestrator; freeze keeps slot (D2) | unanimous + hold; `frozenSince`/`frozenAtPostEnd` (E+POST snapshot flag, fixed from verification onward) | ✅ |
 | `replace` | compromised owner | identity transfer (frozen state + bindings) | unanimous + hold; alias chain (`_resolve`) keeps binding resolution correct; re-admit reset | ✅ |
 | `reassignBinding` | compromised owner | disputed-pair reassignment | unanimous + hold; target must be admitted | ✅ |
 | `replaceOwner` | compromised owner | owner rotation | unanimousNoHold (immediate) + `isProbablyASafe`; `CannotRemoveLastOwner` protects the last owner | ✅ (E1 added; rotation only, n-of-n loss is a protocol premise) |
 | `setAdmittedLists` / `setPricingParams` | compromised owner | allowlist / pricing-parameter manipulation | unanimous + hold; `MAX_ALLOWLIST(64)`; pricing bound `priceBand ≤ BASIS_POINTS` (MIN_LOT is governance-trusted for the off-chain indexer, FIPs#1275) | ✅ |
 | `cancelPending` | compromised owner | veto queued change | `_veto` requires `msg.sender.isOwner()` | ✅ |
-| `correctVolume` | compromised owner | overwrite posted volume (governance path into FPV) | unanimousNoHold + in-body `_inVerificationWindow`; same `MAX_FPV_USD` bound as postVolume | ✅ (bidirectional correction by design, D3a) |
+| `correctVolume` | compromised owner | overwrite posted volume (governance path into FPV) | unanimousNoHold + in-body `_inVerificationWindow`; same `MAX_FPV_USD` bound as postVolume; **`NotFrozen` gate (freeze symmetry with `postVolume` — A2/A3 fix: a suspended orchestrator cannot be re-admitted via the governance path)** | ✅ (bidirectional correction by design, D3a) |
 | `submitShares` | external caller | trigger share settlement | `_afterBinding` gate; permissionless; frozen snapshot from E+POST instant (timing-independent); all-zero → benign no-op (FIPs#1275, replacing D1 burn) | ✅ |
 
 **S4 conclusion**: every external write function is closed against a malicious internal party — either by unanimous dual-Safe governance (owner surface), or by code-enforced input bounds + timing gates (orchestrator surface). The only residual exposures are protocol-layer premises (dual-Safe private-key security; f02 wire contract), not contract-layer vulnerabilities.

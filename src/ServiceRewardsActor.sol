@@ -16,7 +16,9 @@ pragma solidity ^0.8.36;
 //     PricePeriod[]/FinalizeConversion/PRICE_BAND on-chain; all-zero quarter -> SubmitShares no-op
 //   - D2: admitted (incl. frozen) <= 64; Admit rejects when full; only Remove releases; Freeze does not release
 //   - D3a: correctVolume bidirectional correction (unanimousNoHold + in-body verification-window check)
-//   - S5: freeze snapshot uses freezeEpochs/unfreezeEpochs history arrays + paired-interval determination (E+POST instant)
+//   - S5: freeze snapshot = stored frozenAtPostEnd flag (E+POST instant; set/cleared only before E+POST,
+//     fixed from the verification window onward) + frozenSince (current freeze state); at the mirror
+//     advance the flag is snapshotted into prevFpv (prevFpv <- frozenAtPostEnd ? 0 : fpv)
 //
 // Storage: 4 ERC-7201 namespaces (Registry/AdmittedLists/Quarter/Params),
 //       reusing Solstice.Owners (dual Safe) and Solstice.PendingTasks (governance queue).
@@ -104,16 +106,17 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // Events and errors
     // ------------------------------------------------------------------------
 
-    event OrchestratorAdmitted(address indexed orch);
-    event OrchestratorRemoved(address indexed orch);
-    event OrchestratorFrozen(address indexed orch);
-    event OrchestratorUnfrozen(address indexed orch);
-    event OrchestratorReplaced(address indexed oldOrch, address indexed newOrch);
-    event BindingReassigned(address indexed payer, address indexed operator, address indexed orch);
+    event OrchestratorAdmitted(address indexed orchestrator);
+    event OrchestratorRemoved(address indexed orchestrator);
+    event OrchestratorFrozen(address indexed orchestrator);
+    event OrchestratorUnfrozen(address indexed orchestrator);
+    event OrchestratorReplaced(address indexed oldOrchestrator, address indexed newOrchestrator);
+    event BindingDeclared(address indexed payer, address indexed operator, address indexed orchestrator);
+    event BindingReassigned(address indexed payer, address indexed operator, address indexed orchestrator);
     event AdmittedListsUpdated(uint256 stablecoinCount, uint256 filecoinPayCount);
     event PricingParamsUpdated(uint256 minLot, uint256 priceBand);
-    event VolumePosted(uint64 indexed q, address indexed orch);
-    event VolumeCorrected(uint64 indexed q, address indexed orch);
+    event VolumePosted(uint64 indexed q, address indexed orchestrator);
+    event VolumeCorrected(uint64 indexed q, address indexed orchestrator);
     event SharesSubmitted(uint64 indexed q, uint256 recipientCount, FixedU18 totalUsd);
 
     error NotAdmitted(address orch);
@@ -128,6 +131,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     error AlreadyPosted(uint64 q);
     error AlreadySubmitted(uint64 q); // FIP: SubmitShares reverts once a quarter's map is submitted
     error NotLatestQuarter(uint64 q); // FIP-0118 §4.2: an older quarter's shares can never overwrite a newer quarter's
+    error PendingShares(uint64 q); // FIP-0118 §3.2/§4.4: RemoveOrchestrator reverts while an ended quarter awaits its share map
     error TooManyPairs(); // registerPairs batch exceeds MAX_PAIRS
     error InvalidParameter();
 
@@ -211,25 +215,42 @@ contract ServiceRewardsActor is UnanimousGovernance {
         return nowE > verifyEnd;
     }
 
-    /// @dev frozen determination at the E+POST instant (S5 snapshot semantics: derivable at any point, independent of call timing).
-    function _frozenAtPostEnd(address orch, uint64 q) internal view returns (bool) {
-        return _isFrozenAt(orch, _qEnd(q) + POST_PERIOD);
+    /// @dev The latest quarter whose volumes are bound but whose share map has not been submitted
+    ///      (spec §3.2/§4.4: RemoveOrchestrator is not callable while an ended quarter awaits its
+    ///      share map — governance clears it by cranking SubmitShares first). Mirrors submitShares'
+    ///      latest-bound-quarter determination: the latest bound quarter is activeQ if it has passed
+    ///      binding, else activeQ - 1 (an advance into a new quarter implies the previous one is past
+    ///      E+POST, hence bound). Only the *latest* bound quarter matters — a superseded quarter
+    ///      (skipped by a lag > 1) can never be submitted, so keying on it would deadlock removal.
+    ///      lastSubmittedQ is a q+1 encoding (0 = none), so "awaiting" ⟺ lastSubmittedQ != latest + 1.
+    function _pendingSharesQuarter() internal view returns (bool hasPending, uint64 q) {
+        SraStorage.SraStorageQuarter storage qt = _quarter();
+        uint64 latest;
+        if (_afterBinding(qt.activeQ)) {
+            latest = qt.activeQ;
+        } else if (qt.activeQ > 0) {
+            latest = qt.activeQ - 1;
+        } else {
+            return (false, 0); // genesis: nothing bound yet
+        }
+        if (qt.lastSubmittedQ != latest + 1) return (true, latest);
+        return (false, 0);
     }
 
-    /// @dev Determines whether the epoch falls inside any [freezeEpochs[i], unfreezeEpochs[i]) freeze interval.
-    function _isFrozenAt(address orch, Epoch e) internal view returns (bool) {
-        SraStorage.OrchestratorInfo storage o = _registry().orchestrators[orch];
-        uint256 n = o.freezeEpochs.length;
-        for (uint256 i = 0; i < n; i++) {
-            if (e >= o.freezeEpochs[i]) {
-                if (i < o.unfreezeEpochs.length && e >= o.unfreezeEpochs[i]) {
-                    continue; // this interval already unfrozen; check the next
-                }
-                return true;
-            }
-            return false; // freezeEpochs is increasing; later ones are even larger
+    /// @dev Mirror advance: the first write of a new quarter (postVolume or correctVolume with
+    ///      q != activeQ) backs the active-quarter contributions up into the previous-quarter
+    ///      mirror — exclusion-fixed (frozenAtPostEnd ? 0 : fpv), because the freeze state of the
+    ///      previous quarter's E+POST is no longer derivable once the quarter has advanced — and
+    ///      clears the active slots for the new quarter.
+    function _advanceMirror(SraStorage.SraStorageQuarter storage qt, uint64 q) internal {
+        SraStorage.SraStorageRegistry storage r = _registry();
+        for (uint256 i = 0; i < r.admittedList.length; i++) {
+            SraStorage.OrchestratorInfo storage o = r.orchestrators[r.admittedList[i]];
+            o.prevFpv = o.frozenAtPostEnd ? FixedU18.wrap(0) : o.fpv;
+            o.fpv = FixedU18.wrap(0);
+            o.frozenAtPostEnd = false; // new quarter: E+POST not reached, nothing frozen yet
         }
-        return false;
+        qt.activeQ = q;
     }
 
     // ------------------------------------------------------------------------
@@ -244,7 +265,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.OrchestratorInfo storage o = r.orchestrators[msg.sender];
         require(o.admitted, NotAdmitted(msg.sender));
-        require(!o.frozen, NotFrozen(msg.sender));
+        require(o.frozenSince == Epoch.wrap(0), NotFrozen(msg.sender));
 
         for (uint256 i = 0; i < pairs.length; i++) {
             bytes32 pairId = _pairId(pairs[i].payer, pairs[i].operator);
@@ -257,6 +278,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
                 revert AlreadyBound(pairId);
             }
             r.bindings[pairId] = msg.sender;
+            emit BindingDeclared(pairs[i].payer, pairs[i].operator, msg.sender);
         }
     }
 
@@ -267,19 +289,24 @@ contract ServiceRewardsActor is UnanimousGovernance {
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.OrchestratorInfo storage o = r.orchestrators[msg.sender];
         require(o.admitted, NotAdmitted(msg.sender));
-        require(!o.frozen, NotFrozen(msg.sender));
+        require(o.frozenSince == Epoch.wrap(0), NotFrozen(msg.sender));
         require(_inPostingWindow(q), NotInPostingWindow(q));
 
         // The single USD total is the only on-chain input that feeds _computeShares;
         // bound it at the entry so the share arithmetic cannot overflow (see MAX_FPV_USD).
-        require(fpv <= MAX_FPV_USD, InvalidParameter());
+        // Reject zero: a zero total is equivalent to not posting (both excluded from the
+        // aggregate), so `usd == 0` unambiguously means "not posted".
+        require(FixedU18.unwrap(fpv) > 0 && fpv <= MAX_FPV_USD, InvalidParameter());
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
-        FPV storage stored = qt.fpv[q][msg.sender];
-        require(!stored.posted, AlreadyPosted(q));
 
-        stored.usd = fpv; // FixedU18 — 18-decimal USD, type-checked from the entry
-        stored.posted = true;
+        // Mirror advance on the first write of the quarter (q == activeQ afterwards; the
+        // previous quarter's contributions back up into prevFpv, exclusion-fixed). The advance
+        // clears the active slot, so the already-posted check below is against the new quarter.
+        if (qt.activeQ != q) _advanceMirror(qt, q);
+        require(FixedU18.unwrap(o.fpv) == 0, AlreadyPosted(q));
+        o.fpv = fpv; // FixedU18 — 18-decimal USD, type-checked from the entry
+        qt.totalUsd[q] = qt.totalUsd[q] + fpv;
 
         emit VolumePosted(q, msg.sender);
     }
@@ -290,34 +317,50 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
     /// @notice Admits an orchestrator; rejects when admitted total >= 64 (D2).
     /// @dev Re-admit = fresh identity (symmetric with remove cleanup): when an old address is re-admitted after replace,
-    ///      clears the residual successor alias chain and freeze history — otherwise submitShares's _frozenAtPostEnd
-    ///      checks the address itself (not frozen, passes) but _resolve resolves along the residual chain to the frozen
+    ///      clears the residual successor alias chain and freeze/contribution state — otherwise submitShares's
+    ///      frozenAtPostEnd check passes for the address itself but _resolve resolves along the residual chain to the frozen
     ///      successor, so a frozen orchestrator would receive a share through the resolve chain; residual frozen state
     ///      would also carry over on re-admission.
     function admit(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
         require(!r.orchestrators[orch].admitted, AlreadyAdmitted(orch));
-        require(r.admittedCount < MAX_ORCHESTRATORS, AtCapacity());
+        require(r.admittedList.length < MAX_ORCHESTRATORS, AtCapacity());
         r.orchestrators[orch].admitted = true;
         r.orchestrators[orch].successor = address(0);
-        r.orchestrators[orch].frozen = false;
-        delete r.orchestrators[orch].freezeEpochs;
-        delete r.orchestrators[orch].unfreezeEpochs;
+        r.orchestrators[orch].frozenSince = Epoch.wrap(0); // fresh identity: clear residual freeze state
+        r.orchestrators[orch].frozenAtPostEnd = false;
+        r.orchestrators[orch].fpv = FixedU18.wrap(0);
+        r.orchestrators[orch].prevFpv = FixedU18.wrap(0);
         r.admittedList.push(orch);
-        r.admittedCount++;
         emit OrchestratorAdmitted(orch);
     }
 
     /// @notice Permanent removal; releases all bindings (pairs return to unclaimed) (spec §4.2).
+    /// @dev Timing guard (spec §3.2/§4.4): RemoveOrchestrator reverts while an ended quarter awaits
+    ///      its share map — from the end of a quarter until that quarter's SubmitShares has run.
+    ///      This guarantees the submitted map's collection (current admitted list + prevFpv/fpv
+    ///      snapshot) is always consistent with the quarter counter: no removal can bind between the
+    ///      close of the posting period and SubmitShares, so a bound quarter's contributors are
+    ///      exactly the orchestrators its map is computed over. Governance clears the pending quarter
+    ///      by cranking SubmitShares first, then removes in a later message.
     function remove(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
-        require(r.orchestrators[orch].admitted, NotAdmitted(orch));
-        r.orchestrators[orch].admitted = false;
-        r.orchestrators[orch].frozen = false;
-        r.orchestrators[orch].successor = address(0);
-        delete r.orchestrators[orch].freezeEpochs;
-        delete r.orchestrators[orch].unfreezeEpochs;
-        r.admittedCount--;
+        SraStorage.OrchestratorInfo storage o = r.orchestrators[orch];
+        require(o.admitted, NotAdmitted(orch));
+        (bool hasPending, uint64 pendingQ) = _pendingSharesQuarter();
+        if (hasPending) revert PendingShares(pendingQ);
+        // Mirror: drop the active-quarter contribution if it is still effective — a freeze
+        // before E+POST already deducted it (frozenAtPostEnd), so no double deduction.
+        if (!o.frozenAtPostEnd && FixedU18.unwrap(o.fpv) > 0) {
+            SraStorage.SraStorageQuarter storage qt = _quarter();
+            qt.totalUsd[qt.activeQ] = qt.totalUsd[qt.activeQ] - o.fpv;
+        }
+        o.admitted = false;
+        o.frozenSince = Epoch.wrap(0);
+        o.frozenAtPostEnd = false;
+        o.successor = address(0);
+        o.fpv = FixedU18.wrap(0);
+        o.prevFpv = FixedU18.wrap(0);
         _swapRemove(r.admittedList, orch);
         emit OrchestratorRemoved(orch);
     }
@@ -325,24 +368,40 @@ contract ServiceRewardsActor is UnanimousGovernance {
     /// @notice Freeze: suspends, zeroes shares, excludes FPV (spec §4.2). Freeze does not release a slot.
     function freeze(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
-        require(r.orchestrators[orch].admitted, NotAdmitted(orch));
-        require(!r.orchestrators[orch].frozen, AlreadyFrozen(orch));
-        r.orchestrators[orch].frozen = true;
-        r.orchestrators[orch].freezeEpochs.push(currentEpoch());
+        SraStorage.OrchestratorInfo storage o = r.orchestrators[orch];
+        require(o.admitted, NotAdmitted(orch));
+        require(o.frozenSince == Epoch.wrap(0), AlreadyFrozen(orch));
+        Epoch nowE = currentEpoch();
+        o.frozenSince = nowE;
+        // fpv-effectiveness: a freeze before the posting window closes excludes the active
+        // quarter (E+POST snapshot); from the verification window onward the quarter is fixed.
+        uint64 q = _quarter().activeQ;
+        if (nowE <= _qEnd(q) + POST_PERIOD && FixedU18.unwrap(o.fpv) > 0) {
+            _quarter().totalUsd[q] = _quarter().totalUsd[q] - o.fpv; // fpv retained as unfreeze restore source
+            o.frozenAtPostEnd = true;
+        }
         emit OrchestratorFrozen(orch);
     }
 
     /// @notice Exact restoration (spec §4.2).
     function unfreeze(address orch) external unanimous(keccak256(msg.data), SRA_CANCEL_HOLD) {
         SraStorage.SraStorageRegistry storage r = _registry();
-        require(r.orchestrators[orch].admitted, NotAdmitted(orch));
-        require(r.orchestrators[orch].frozen, NotFrozen(orch));
-        r.orchestrators[orch].frozen = false;
-        r.orchestrators[orch].unfreezeEpochs.push(currentEpoch());
+        SraStorage.OrchestratorInfo storage o = r.orchestrators[orch];
+        require(o.admitted, NotAdmitted(orch));
+        require(!(o.frozenSince == Epoch.wrap(0)), NotFrozen(orch));
+        Epoch nowE = currentEpoch();
+        o.frozenSince = Epoch.wrap(0);
+        // Symmetric with freeze: an unfreeze before the posting window closes re-includes the
+        // active-quarter contribution (if posted); from the verification window onward it is fixed.
+        uint64 q = _quarter().activeQ;
+        if (nowE <= _qEnd(q) + POST_PERIOD && FixedU18.unwrap(o.fpv) > 0) {
+            _quarter().totalUsd[q] = _quarter().totalUsd[q] + o.fpv;
+            o.frozenAtPostEnd = false;
+        }
         emit OrchestratorUnfrozen(orch);
     }
 
-    /// @notice Operator address change (spec §4.2). Identity (frozen state/freeze history) and all bindings transfer to newOrch.
+    /// @notice Operator address change (spec §4.2). Identity (frozen state, contribution slots) and all bindings transfer to newOrch.
     /// @dev bindings store the admitted address; reads resolve along the alias chain to the current valid address (design-gap
     ///      completion: pairIds cannot be enumerated, so bindings do not migrate storage values; an alias indirection layer
     ///      achieves zero-enumeration transfer).
@@ -351,9 +410,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
         require(r.orchestrators[oldOrch].admitted, NotAdmitted(oldOrch));
         require(!r.orchestrators[newOrch].admitted, AlreadyAdmitted(newOrch));
 
-        // Identity transfer: copy old's frozen state and freeze history to new
+        // Identity transfer: copy old's frozen state and contribution slots to new — the
+        // contribution is inherited (the aggregate is unchanged; ownership moves).
+        // old is the currently valid (admitted) orchestrator, so its successor is always address(0)
+        // — the copied value is already zero, no explicit clear needed.
         r.orchestrators[newOrch] = r.orchestrators[oldOrch];
-        r.orchestrators[newOrch].successor = address(0);
         // old becomes invalid, alias points to new (bindings resolve to new on read)
         r.orchestrators[oldOrch].admitted = false;
         r.orchestrators[oldOrch].successor = newOrch;
@@ -444,13 +505,34 @@ contract ServiceRewardsActor is UnanimousGovernance {
         require(_inVerificationWindow(q), NotInVerificationWindow(q));
         require(_isAdmitted(orch), NotAdmitted(orch));
 
+        // Freeze symmetry: postVolume gates on frozenSince (a frozen orchestrator cannot
+        // post); correctVolume is the governance path into the same FPV storage, so it must not
+        // re-admit a suspended orchestrator — otherwise a freeze → correctVolume → advance sequence
+        // clears frozenAtPostEnd and the frozen orchestrator obtains shares in the next quarter.
+        SraStorage.OrchestratorInfo storage o = _registry().orchestrators[orch];
+        require(o.frozenSince == Epoch.wrap(0), NotFrozen(orch));
+
         // Same business-domain bound as postVolume (governance path into the same FPV storage).
         require(value <= MAX_FPV_USD, InvalidParameter());
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
-        FPV storage stored = qt.fpv[q][orch];
-        stored.usd = value; // FixedU18 — 18-decimal USD
-        stored.posted = true;
+
+        // Mirror advance on the first write of the quarter — correctVolume can be the first
+        // writer (supplying recomputed figures for a quarter nobody posted).
+        if (qt.activeQ != q) _advanceMirror(qt, q);
+
+        // Read the old value *after* the advance: on an advance the previous
+        // quarter's fpv has already been backed up into prevFpv and fpv cleared, so oldUsd = 0
+        // and the counter receives the full value; without an advance oldUsd is the current
+        // quarter's value and the counter is adjusted by (value - oldUsd).
+        FixedU18 oldUsd = o.fpv;
+        o.fpv = value; // FixedU18 — 18-decimal USD; value==0 clears (equivalent to not posted)
+
+        // E+POST has passed (verification window): frozenAtPostEnd is final — a frozen-at-E+POST
+        // orchestrator never enters the aggregate (its value is recorded, not counted).
+        if (!o.frozenAtPostEnd) {
+            qt.totalUsd[q] = qt.totalUsd[q] + value - oldUsd;
+        }
 
         emit VolumeCorrected(q, orch);
     }
@@ -472,26 +554,41 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
         SraStorage.SraStorageRegistry storage r = _registry();
         SraStorage.SraStorageQuarter storage qt = _quarter();
-        require(!qt.sharesSubmitted[q], AlreadySubmitted(q));
+        require(q + 1 != qt.lastSubmittedQ, AlreadySubmitted(q));
 
-        // Collect non-excluded (not frozen at the E+POST instant) orchestrators with posted usd > 0
+        // q is the latest bound quarter: q == activeQ (bound, mirror not advanced yet) or
+        // q == activeQ - 1 (advanced). The mirror slots already encode the exclusion: the
+        // active-quarter read filters frozenAtPostEnd; prevFpv was exclusion-fixed at the advance.
+        bool usePrev = q != qt.activeQ;
         address[] memory wallets = new address[](r.admittedList.length);
         FixedU18[] memory usds = new FixedU18[](r.admittedList.length);
         uint256 count = 0;
-        FixedU18 total;
+        // Sum over the collected entries (the current admitted list) — self-consistent with the
+        // collection. The quarter counter (totalUsd) is a binding snapshot that can outlive a
+        // lag-window remove, so it must not drive the largest-remainder split
+        // (an oversized total underflowed the bump loop). aggregatedFPV keeps the counter (O(1)).
+        FixedU18 total = FixedU18.wrap(0);
         for (uint256 i = 0; i < r.admittedList.length; i++) {
-            address orch = r.admittedList[i];
-            if (_frozenAtPostEnd(orch, q)) continue;
-            FixedU18 usd = qt.fpv[q][orch].usd;
-            if (FixedU18.unwrap(usd) == 0) continue;
-            wallets[count] = _resolve(orch);
-            usds[count] = usd;
-            total = total + usd;
+            SraStorage.OrchestratorInfo storage o = r.orchestrators[r.admittedList[i]];
+            if (usePrev) {
+                if (FixedU18.unwrap(o.prevFpv) == 0) continue;
+                wallets[count] = _resolve(r.admittedList[i]);
+                usds[count] = o.prevFpv;
+            } else {
+                if (o.frozenAtPostEnd || FixedU18.unwrap(o.fpv) == 0) continue;
+                wallets[count] = _resolve(r.admittedList[i]);
+                usds[count] = o.fpv;
+            }
+            total = total + usds[count];
             count++;
         }
 
         // FIP-0118: an all-zero quarter is a benign no-op — no SplitRule, no SetShares, existing map stands.
-        if (FixedU18.unwrap(total) == 0) return;
+        // It still counts as submitted (the quarter cannot be resubmitted).
+        if (FixedU18.unwrap(total) == 0) {
+            qt.lastSubmittedQ = q + 1;
+            return;
+        }
 
         Share[] memory shares = _computeShares(wallets, usds, count, total);
         // Trim zero-share entries: the largest-remainder method can floor a tiny usd to 0
@@ -509,7 +606,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
             shares = trimmed;
         }
 
-        qt.sharesSubmitted[q] = true; // CEI: mark before the external call
+        qt.lastSubmittedQ = q + 1; // CEI: mark before the external call
         FVMRewards.setShares(SERVICE_STREAM_ID, shares);
         emit SharesSubmitted(q, shares.length, total); // totalUsd as FixedU18 (18-decimal USD)
     }
@@ -521,20 +618,16 @@ contract ServiceRewardsActor is UnanimousGovernance {
     // forge-lint: disable-next-item(mixed-case-function) — FIP-0118 spec method name (selector-affecting)
     /// @notice Returns the post-binding USD aggregate (FIP-0118 §4.2): Σ of each non-excluded posted orchestrator's
     ///         bound USD value. Pure view — the FIL→USD conversion happens off-chain (FIPs#1275), so there is no
-    ///         on-chain finalize to trigger.
+    ///         on-chain finalize to trigger. #10: O(1) via the active-quarter mirror (the SWA's hot path);
+    ///         historical quarters fall back to a linear scan (audit/backfill only).
     /// @dev Reverts NotBound(q) before binding — distinguishes "quarter not yet bound" (call too early; the SWA
     ///      does not need to re-enforce the check) from "quarter with zero declared volume" (legitimately returns 0).
     function aggregatedFPV(uint64 q) external view returns (FixedU18 usd) {
         require(_afterBinding(q), NotBound(q));
-        SraStorage.SraStorageRegistry storage r = _registry();
-        SraStorage.SraStorageQuarter storage qt = _quarter();
-        for (uint256 i = 0; i < r.admittedList.length; i++) {
-            address orch = r.admittedList[i];
-            if (_frozenAtPostEnd(orch, q)) continue;
-            FPV storage fpv = qt.fpv[q][orch];
-            if (!fpv.posted) continue;
-            usd = usd + fpv.usd; // FixedU18 addition — 18-decimal fixed point, matches IServiceRewardsActor
-        }
+        // Quarter counter array — O(1) for every quarter. Values are fixed once the mirror
+        // advances (spec determinism: the registry is constant within a quarter, so the
+        // aggregate cannot drift with later remove/replace).
+        return _quarter().totalUsd[q];
     }
 
     /// @dev Quarter end epoch for quarter q (Epoch-typed; exposed per the IServiceRewardsActor interface the SWA consumes).
@@ -547,11 +640,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
     }
 
     function isFrozen(address orch) external view returns (bool) {
-        return _registry().orchestrators[orch].frozen;
+        return !(_registry().orchestrators[orch].frozenSince == Epoch.wrap(0));
     }
 
     function admittedCount() external view returns (uint64) {
-        return _registry().admittedCount;
+        return uint64(_registry().admittedList.length); // MAX_ORCHESTRATORS bound keeps this < 2^64
     }
 
     function bindingOf(address payer, address operator) external view returns (address) {
@@ -559,7 +652,14 @@ contract ServiceRewardsActor is UnanimousGovernance {
     }
 
     function fpvOf(uint64 q, address orch) external view returns (FPV memory) {
-        return _quarter().fpv[q][orch];
+        SraStorage.OrchestratorInfo storage o = _registry().orchestrators[orch];
+        uint64 activeQ = _quarter().activeQ;
+        // Mirror slots retain only the active and the previous quarter (spec: CorrectVolume is
+        // bounded by the verification window, so no historical per-orchestrator corrections
+        // exist); earlier quarters return 0 — the aggregate is the only historical read (totalUsd).
+        if (q == activeQ) return FPV({usd: o.fpv});
+        if (activeQ > 0 && q == activeQ - 1) return FPV({usd: o.prevFpv});
+        return FPV({usd: FixedU18.wrap(0)});
     }
 
     function isStablecoinAdmitted(address token) external view returns (bool) {
@@ -572,7 +672,7 @@ contract ServiceRewardsActor is UnanimousGovernance {
     }
 
     function orchestratorCount() external view returns (uint64) {
-        return _registry().admittedCount;
+        return uint64(_registry().admittedList.length);
     }
 
     // ------------------------------------------------------------------------
@@ -622,10 +722,6 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
     function _isAdmitted(address orch) internal view returns (bool) {
         return _registry().orchestrators[orch].admitted;
-    }
-
-    function _isFrozen(address orch) internal view returns (bool) {
-        return _registry().orchestrators[orch].frozen;
     }
 
     /// @dev Resolves a binding along the alias chain to the current valid orchestrator address (replace support).

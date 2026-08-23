@@ -2,7 +2,7 @@
 pragma solidity ^0.8.36;
 
 import {Epoch} from "./Epoch.sol";
-import {FPV} from "./SraTypes.sol";
+import {FixedU18} from "./FixedU18.sol";
 
 // ----------------------------------------------------------------------------
 // SRA ERC-7201 storage layout (4 namespaces) + precomputed slots, in a shared
@@ -13,18 +13,27 @@ import {FPV} from "./SraTypes.sol";
 library SraStorage {
     struct OrchestratorInfo {
         bool admitted; // admitted
-        bool frozen; // current frozen state (checked immediately by registerPairs/postVolume)
-        Epoch[] freezeEpochs; // epoch of each freeze execution (S5 freeze history array)
-        Epoch[] unfreezeEpochs; // epoch of each unfreeze execution
+        // Frozen-at-E+POST flag: exactly "was this orchestrator frozen at the close of the
+        // posting period of the active quarter" — the fpv-effectiveness test. It changes only
+        // before E+POST (freeze/unfreeze in the posting window set/clear it); from the
+        // verification window onward it is fixed. Contrast frozenSince, which tracks the
+        // current freeze state (0 = not frozen) for admission checks and freeze/unfreeze symmetry.
+        bool frozenAtPostEnd;
+        Epoch frozenSince; // current freeze state: 0 = not frozen; > 0 = frozen since this epoch
         address successor; // binding resolution chain after replace (non-zero = transferred to successor; design-gap completion)
+        // Contribution slots (mirror): fpv = active-quarter contribution (0 = not posted),
+        // prevFpv = previous-quarter contribution mirror, exclusion-fixed at mirror advance
+        // (prevFpv <- frozenAtPostEnd ? 0 : fpv; fpv = 0). submitShares reads fpv for the
+        // active quarter (q == activeQ) and prevFpv for the previous one (q == activeQ - 1).
+        FixedU18 fpv;
+        FixedU18 prevFpv;
     }
 
     /// @custom:storage-location erc7201:Solstice.SRA.Registry
     struct SraStorageRegistry {
         mapping(address orch => OrchestratorInfo) orchestrators;
         mapping(bytes32 pairId => address orch) bindings; // pairId = keccak256(abi.encode(payer, operator))
-        uint64 admittedCount; // includes frozen, used for the D2 cap check
-        address[] admittedList; // enumerable admitted (needed by finalize/submitShares/aggregatedFPV traversal; design-gap completion)
+        address[] admittedList; // enumerable admitted (incl. frozen); length doubles as the count
     }
 
     /// @custom:storage-location erc7201:Solstice.SRA.AdmittedLists
@@ -37,10 +46,17 @@ library SraStorage {
 
     /// @custom:storage-location erc7201:Solstice.SRA.Quarter
     struct SraStorageQuarter {
-        mapping(uint64 Q => mapping(address orch => FPV)) fpv;
-        // FIP-0118 (FIPs#1275): FIL→USD conversion moved off-chain — no FinalizeConversion,
-        // no PRICE_BAND anchor state (lastBoundPrint/hasBoundPrint) on-chain anymore.
-        mapping(uint64 Q => bool) sharesSubmitted; // FIP: SubmitShares reverts once a quarter's map is submitted
+        // activeQ: the quarter the mirror has advanced to (postVolume/correctVolume set it on
+        // the first write of a new quarter — the advance trigger). The previous quarter's
+        // per-orchestrator contributions live in prevFpv (exclusion-fixed at the advance);
+        // only these two quarters retain per-orchestrator values (spec: CorrectVolume is
+        // bounded by the verification window, so no historical corrections exist).
+        uint64 activeQ;
+        uint64 lastSubmittedQ; // anti-replay: last submitted quarter + 1 (0 = none; q+1 encoding so quarter 0 does not collide with the sentinel; monotonic, no reset)
+        // Quarter counter array: per-quarter USD aggregate (aggregatedFPV O(1) for every
+        // quarter, fixed once the mirror advances — spec determinism: the registry is constant
+        // within a quarter, so the aggregate cannot drift with later remove/replace).
+        mapping(uint64 Q => FixedU18) totalUsd;
     }
 
     /// @custom:storage-location erc7201:Solstice.SRA.Params

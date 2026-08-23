@@ -79,6 +79,35 @@ contract SRAQuarterTest is SRATestBase {
         sra.postVolume(0, FixedU18.wrap(_fpv(200e18)));
     }
 
+    /// #7: zero posting is rejected — a zero total is equivalent to not posting, so
+    ///     `usd == 0` unambiguously means "not posted" (postVolume requires > 0).
+    function test_PostVolume_Zero_Reverts() public {
+        address orch = makeAddr("orch");
+        _admit(orch);
+
+        vm.roll(_qEnd(0) + 1);
+        vm.prank(orch);
+        vm.expectRevert(); // InvalidParameter — zero total rejected
+        sra.postVolume(0, FixedU18.wrap(0));
+    }
+
+    /// #7: CorrectVolume(0) clears a posted value (equivalent to not posted) —
+    ///     the orchestrator is excluded from the aggregate.
+    function test_CorrectVolume_Zero_Clears() public {
+        address orch = makeAddr("orch");
+        _admit(orch);
+
+        vm.roll(_qEnd(0) + 1);
+        _postAs(orch, 0, _fpv(100e18));
+
+        vm.roll(_qPostEnd(0) + 1); // verification window
+        _correctVolume(orch, 0, 0); // clear to zero
+
+        vm.roll(_qVerifyEnd(0) + 1); // post-binding
+        assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 0);
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 0);
+    }
+
     // ------------------------------------------------------------------------
     // Strategy 7: CorrectVolume (within the verification window)
     // ------------------------------------------------------------------------
@@ -131,7 +160,6 @@ contract SRAQuarterTest is SRATestBase {
         vm.roll(_qPostEnd(0) + 1); // unposted, straight into verification
         _correctVolume(orch, 0, _fpv(150e18));
         assertEq(FixedU18.unwrap(sra.fpvOf(0, orch).usd), 150e18);
-        assertTrue(sra.fpvOf(0, orch).posted);
     }
 
     /// Strategy 7: the verification window's right boundary is inclusive of E+POST+VERIFY.
@@ -216,7 +244,7 @@ contract SRAQuarterTest is SRATestBase {
         assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18);
     }
 
-    /// Strategy 11/CV7: some orchestrators did not post -> aggregatedFPV skips them (!posted continue).
+    /// Strategy 11/CV7: some orchestrators did not post -> aggregatedFPV skips them (usd==0 continue).
     function test_AggregatedFPV_UnpostedOrch_Excluded() public {
         address orchA = makeAddr("orchA");
         address orchB = makeAddr("orchB"); // B admitted but does not post
