@@ -50,7 +50,12 @@ contract SRAInvariantHandler is SRATestBase {
     address[] internal _orchPool;
     mapping(address => bool) internal _admitted; // expected admitted
     mapping(address => bool) internal _frozen; // expected frozen
-    mapping(address => address) internal _successor; // replace chain (handler side)
+    /// @dev identity generation per address: incremented on every admit. The id-keyed implementation reuses an
+    ///      address across successive identities (remove -> re-admit -> new id), so an address alone cannot
+    ///      identify which id holds a binding; the generation disambiguates it (replace re-points the *current*
+    ///      generation's pairs only).
+    mapping(address => uint256) internal _idGen;
+    uint256 internal _genSeq;
 
     // ---- pair pool and binding records ----
     address[] internal _payers;
@@ -60,6 +65,7 @@ contract SRAInvariantHandler is SRATestBase {
         address payer;
         address operator;
         address boundOrch; // handler-recorded last successful binder
+        uint256 gen; // binder identity generation at binding time
     }
     PairRecord[] internal _pairs;
     mapping(bytes32 => uint256) internal _pairIdx; // pairId → _pairs index + 1
@@ -122,10 +128,12 @@ contract SRAInvariantHandler is SRATestBase {
         vm.roll(block.number + SRA_CANCEL_HOLD);
         sra.admit(orch); // permissionless execution
         _admitted[orch] = true;
-        // A2 sync: the implementation's admit identity reset (clears successor/frozen/freeze history) -> the handler-side
-        // expected state is cleared in sync, otherwise I3c (isFrozen consistency) and A2 (freeze-interval tracking) false-positive.
+        _genSeq++;
+        _idGen[orch] = _genSeq; // fresh identity generation (re-admit = new id)
+        // A2 sync: the implementation's fresh-id admit (no residual frozen/freeze history on a new id) -> the
+        // handler-side expected state is cleared in sync, otherwise I3c (isFrozen consistency) and A2
+        // (freeze-interval tracking) false-positive.
         _frozen[orch] = false;
-        _successor[orch] = address(0);
         delete _freezeAt[orch];
         delete _unfreezeAt[orch];
         _recordExecuted(taskId);
@@ -151,8 +159,7 @@ contract SRAInvariantHandler is SRATestBase {
         sra.remove(orch);
         _admitted[orch] = false;
         _frozen[orch] = false;
-        _successor[orch] = address(0); // implementation remove: r.orchestrators[orch].successor = 0
-        delete _freezeAt[orch]; // implementation remove deletes freezeEpochs/unfreezeEpochs
+        delete _freezeAt[orch]; // implementation remove: the id leaves the admitted set (no reachable history)
         delete _unfreezeAt[orch];
         _recordExecuted(taskId);
     }
@@ -189,7 +196,8 @@ contract SRAInvariantHandler is SRATestBase {
         _recordExecuted(taskId);
     }
 
-    /// @notice Identity transfer: old invalidated (successor=new); frozen state transfers to new via struct copy.
+    /// @notice Identity transfer: old invalidated, new becomes the id's wallet (O(1) wallet re-point in the id-keyed model);
+    ///         frozen state and freeze history follow the id, now reachable via newOrch.
     function replace(uint256 oldIdx, uint256 newIdx) external {
         address oldOrch = _pickOrch(oldIdx);
         address newOrch = _pickOrch(newIdx);
@@ -204,12 +212,12 @@ contract SRAInvariantHandler is SRATestBase {
         vm.roll(block.number + SRA_CANCEL_HOLD);
         sra.replace(oldOrch, newOrch);
         _admitted[oldOrch] = false;
-        _successor[oldOrch] = newOrch;
-        _successor[newOrch] = address(0); // implementation fully overwrites the newOrch struct (successor zeroed) — key for I2
         _admitted[newOrch] = true;
         _frozen[newOrch] = _frozen[oldOrch];
-        // freeze-history deep copy: the implementation's replace fully overwrites the struct (freezeEpochs/unfreezeEpochs
-        // transfer with the identity; newOrch's original history is overwritten) — the key alignment for A2 freeze-snapshot determination
+        _frozen[oldOrch] = false;
+        _idGen[newOrch] = _idGen[oldOrch]; // the id (identity) transfers to the new wallet — same generation
+        // freeze-history migration: the id's history is now reachable via newOrch (old's is cleared) —
+        // the key alignment for A2 freeze-snapshot determination
         delete _freezeAt[newOrch];
         delete _unfreezeAt[newOrch];
         for (uint256 i = 0; i < _freezeAt[oldOrch].length; i++) {
@@ -217,6 +225,17 @@ contract SRAInvariantHandler is SRATestBase {
         }
         for (uint256 i = 0; i < _unfreezeAt[oldOrch].length; i++) {
             _unfreezeAt[newOrch].push(_unfreezeAt[oldOrch][i]);
+        }
+        delete _freezeAt[oldOrch];
+        delete _unfreezeAt[oldOrch];
+        // bindings follow the id: every pair bound to the id's previous wallet (old) now resolves to new.
+        // Only the *current generation*'s pairs move — pairs bound to an earlier identity of the same address
+        // (e.g. a removed id whose wallet was also old) keep resolving to that id's wallet (the implementation's
+        // bindingOf reads orchestrators[bindings[pairId]].wallet, which a removed id keeps).
+        for (uint256 i = 0; i < _pairs.length; i++) {
+            if (_pairs[i].boundOrch == oldOrch && _pairs[i].gen == _idGen[oldOrch]) {
+                _pairs[i].boundOrch = newOrch;
+            }
         }
         _recordExecuted(taskId);
     }
@@ -351,9 +370,10 @@ contract SRAInvariantHandler is SRATestBase {
             address orch = _parkedOrch[taskId];
             try sra.admit(orch) {
                 _admitted[orch] = true;
-                // A2 sync: the implementation's admit identity reset -> handler expected state cleared in sync (same as atomic admit).
+                _genSeq++;
+                _idGen[orch] = _genSeq; // fresh identity generation
+                // A2 sync: the implementation's fresh-id admit -> handler expected state cleared in sync (same as atomic admit).
                 _frozen[orch] = false;
-                _successor[orch] = address(0);
                 delete _freezeAt[orch];
                 delete _unfreezeAt[orch];
                 _parkedTarget[orch] = false;
@@ -422,15 +442,6 @@ contract SRAInvariantHandler is SRATestBase {
 
     function expectedFrozen(address orch) external view returns (bool) {
         return _frozen[orch];
-    }
-
-    /// @dev Handler-side resolution along the replace chain (same semantics as the implementation's _resolve).
-    function resolveHandled(address orch) external view returns (address) {
-        address cur = orch;
-        while (cur != address(0) && _successor[cur] != address(0)) {
-            cur = _successor[cur];
-        }
-        return cur;
     }
 
     function knownPairsLength() external view returns (uint256) {
@@ -544,22 +555,29 @@ contract SRAInvariantHandler is SRATestBase {
         return false;
     }
 
-    /// @dev Whether a pair is claimable: unbound, or its binder has been removed (unclaimed).
-    function _claimable(address orch, address payer, address operator) internal view returns (bool) {
-        address cur = sra.bindingOf(payer, operator);
-        if (cur == address(0)) return true;
-        if (cur == orch) return false; // already bound to self -> AlreadyBound
-        return !sra.isAdmitted(cur); // binder removed -> claimable
+    /// @dev Whether a pair is claimable: unbound, or its binder's identity has ended. The id-keyed implementation
+    ///      treats a pair as unclaimed iff the bound id is not admitted; since an address can host successive
+    ///      identities (remove -> re-admit), the handler tracks the binder's identity generation: the pair is
+    ///      claimable iff the recorded binder is no longer admitted or its identity was superseded by a re-admit.
+    function _claimable(address, address payer, address operator) internal view returns (bool) {
+        bytes32 pairId = keccak256(abi.encode(payer, operator));
+        uint256 idx = _pairIdx[pairId];
+        if (idx == 0) return true; // never bound
+        PairRecord storage p = _pairs[idx - 1];
+        if (!_admitted[p.boundOrch]) return true; // binder removed -> unclaimed
+        if (_idGen[p.boundOrch] != p.gen) return true; // binder's identity superseded (re-admitted) -> unclaimed
+        return false; // binder's current identity still holds the pair (self or third party -> AlreadyBound)
     }
 
     function _setBound(address payer, address operator, address orch) internal {
         bytes32 pairId = keccak256(abi.encode(payer, operator));
         uint256 idx = _pairIdx[pairId];
         if (idx == 0) {
-            _pairs.push(PairRecord({payer: payer, operator: operator, boundOrch: orch}));
+            _pairs.push(PairRecord({payer: payer, operator: operator, boundOrch: orch, gen: _idGen[orch]}));
             _pairIdx[pairId] = _pairs.length;
         } else {
             _pairs[idx - 1].boundOrch = orch;
+            _pairs[idx - 1].gen = _idGen[orch];
         }
     }
 }
@@ -605,17 +623,17 @@ contract SRAInvariantTest is Test {
         assertEq(sum, 1e18, "I1: sum of shares must equal SHARE_TOTAL");
     }
 
-    /// I2 Binding uniqueness: every pair's bindingOf must == the handler-recorded last binder (resolved along the replace chain).
+    /// I2 Binding uniqueness: every pair's bindingOf must == the handler-recorded last binder
+    /// (synced on replace — the id-keyed model re-points the wallet, so bindingOf returns the new wallet directly).
     /// Catches: the T6 bug (third-party grabbing the same pair after replace, overwriting the binding),
     ///        registerPairs bypassing the uniqueness check, reassignBinding writes inconsistent with the record.
     function invariant_OneBindingPerPair() public view {
         uint256 n = handler.knownPairsLength();
         for (uint256 i = 0; i < n; i++) {
             (address payer, address operator, address boundOrch) = handler.pairRecordAt(i);
-            address expected = handler.resolveHandled(boundOrch);
             assertEq(
                 handler.sraInstance().bindingOf(payer, operator),
-                expected,
+                boundOrch,
                 "I2: bindingOf must match handler-recorded binder"
             );
         }

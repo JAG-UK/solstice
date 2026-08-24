@@ -15,6 +15,11 @@ import {FixedU18} from "../src/lib/FixedU18.sol";
 import {ServiceRewardsActor} from "../src/ServiceRewardsActor.sol";
 import {Pair, FPV} from "../src/lib/SraTypes.sol";
 
+/// @dev ERC-7201 Registry namespace slot (src/lib/SraStorage.sol) — the id allocator lives at
+///      REGISTRY_SLOT + 3 (low 64 bits = nextId). The test reads it directly because the id is
+///      internal to the identity model (no public getter).
+bytes32 constant REGISTRY_SLOT = 0xb7fd4b054ced95f43476af93bf71636318271f9e64f7661dc52f0fb4c1a54400;
+
 contract SRARegistryTest is SRATestBase {
     // ------------------------------------------------------------------------
     // D2 cap (strategy 5)
@@ -563,5 +568,62 @@ contract SRARegistryTest is SRATestBase {
         _postAs(oldOrch, 1, _fpv(100e18)); // not reverting proves normal operation
         FPV memory f = sra.fpvOf(1, oldOrch);
         assertEq(FixedU18.unwrap(f.usd), 100e18);
+    }
+
+    // ------------------------------------------------------------------------
+    // id-keyed identity: re-admit = fresh id (structural, not a cleanup step)
+    // ------------------------------------------------------------------------
+
+    /// id-keyed identity: re-admit of a removed address allocates a fresh id — the removed identity's bindings
+    /// (pair bound by the old id) and FPV do not carry over. The pair stays claimable and the fresh id's quarter
+    /// record is empty (the old record lives on only under the archived id, unreachable from the address).
+    function test_ReAdmit_FreshIdentity_NoBindingsNoFPV() public {
+        address oldOrch = makeAddr("fresh-old");
+        address third = makeAddr("fresh-third");
+        _admit(oldOrch);
+        _admit(third);
+
+        Pair[] memory pairs = new Pair[](1);
+        pairs[0] = _pair(makeAddr("payer"), makeAddr("operator"));
+        _registerPairsAs(oldOrch, pairs);
+        assertEq(sra.bindingOf(makeAddr("payer"), makeAddr("operator")), oldOrch);
+
+        vm.roll(_qEnd(0) + 1); // q0 posting window
+        _postAs(oldOrch, 0, _fpv(100e18));
+
+        _remove(oldOrch);
+        assertFalse(sra.isAdmitted(oldOrch));
+
+        // re-admit the same address: fresh identity
+        _admit(oldOrch);
+        assertTrue(sra.isAdmitted(oldOrch));
+        assertFalse(sra.isFrozen(oldOrch));
+
+        // the removed identity's binding does not carry over: the pair is claimable by a third party
+        _registerPairsAs(third, pairs); // no revert -> the old id's binding is not inherited
+        assertEq(sra.bindingOf(makeAddr("payer"), makeAddr("operator")), third);
+
+        // the removed identity's FPV does not carry over: the fresh id's quarter-0 record is empty
+        FPV memory f = sra.fpvOf(0, oldOrch);
+        assertEq(FixedU18.unwrap(f.usd), 0);
+    }
+
+    /// id allocation is monotonic and never reuses an id: 0 is the unregistered sentinel, ids start at 1 and
+    /// increase strictly — remove + re-admit of the same address consumes a new id (never the archived one).
+    /// Reads the ERC-7201 registry slot directly (no public getter — the id is internal to the identity model).
+    function test_Admit_IdMonotonic_NeverReused() public {
+        bytes32 slot = bytes32(uint256(REGISTRY_SLOT) + 3); // nextId sits alone in slot3's low 64 bits (no admittedCount packing)
+        assertEq(uint64(uint256(vm.load(address(sra), slot))), 1, "nextId starts at 1 (0 = sentinel)");
+
+        address a = makeAddr("id-a");
+        _admit(a);
+        assertEq(uint64(uint256(vm.load(address(sra), slot))), 2, "first admit consumes id 1");
+
+        _remove(a);
+        _admit(a); // re-admit allocates a NEW id (never reused)
+        assertEq(uint64(uint256(vm.load(address(sra), slot))), 3, "re-admit allocates a fresh id");
+
+        _admit(makeAddr("id-b"));
+        assertEq(uint64(uint256(vm.load(address(sra), slot))), 4, "ids increase strictly");
     }
 }

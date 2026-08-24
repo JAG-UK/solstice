@@ -502,4 +502,94 @@ contract SRASharesTest is SRATestBase {
         assertEq(_walletShare(shares, oldOrch), 1e18, "re-admitted old orchestrator keeps its shares");
         assertEq(_sumShares(shares), 1e18);
     }
+
+    // ------------------------------------------------------------------------
+    // id-keyed identity: replace = O(1) wallet re-point (behavioral lock)
+    // ------------------------------------------------------------------------
+
+    /// id-keyed identity: replace re-points the wallet — historical quarter FPV follows the identity
+    /// (the previous address-keyed implementation lost it from the traversal after replace; here it survives by construction).
+    function test_Replace_HistoricalQuarterFPV_Kept() public {
+        address oldOrch = makeAddr("hist-old");
+        address newOrch = makeAddr("hist-new");
+        _admit(oldOrch);
+        vm.roll(_qEnd(0) + 1); // q0 posting window
+        _postAs(oldOrch, 0, _fpv(100e18));
+
+        // governance replace(old -> new) inside q0's verification window (before binding)
+        vm.roll(_qPostEnd(0) + 1);
+        vm.prank(owner1);
+        sra.replace(oldOrch, newOrch);
+        vm.prank(owner2);
+        sra.replace(oldOrch, newOrch);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        sra.replace(oldOrch, newOrch);
+
+        // submit q0 after binding: the old address's posted FPV is still aggregated under the same identity
+        _rollTo(_qVerifyEnd(0) + 1);
+        sra.submitShares(0);
+        Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 1);
+        assertEq(_walletShare(shares, newOrch), 1e18, "historical FPV follows the identity to the new wallet");
+        assertEq(_sumShares(shares), 1e18);
+
+        // aggregatedFPV agrees: the historical quarter's volume is not lost
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18);
+    }
+
+    /// The share map is always written to the *current* wallet — after replace, newOrch receives the shares and
+    /// the replaced address receives nothing.
+    function test_Replace_ShareMap_WritesNewWallet() public {
+        address oldOrch = makeAddr("wallet-old");
+        address newOrch = makeAddr("wallet-new");
+        _admit(oldOrch);
+        vm.roll(_qEnd(0) + 1); // q0 posting window
+        _postAs(oldOrch, 0, _fpv(50e18));
+        _admitAndPost(50e18); // second orchestrator keeps the split non-trivial
+
+        // replace(old -> new) inside the verification window
+        vm.roll(_qPostEnd(0) + 1);
+        vm.prank(owner1);
+        sra.replace(oldOrch, newOrch);
+        vm.prank(owner2);
+        sra.replace(oldOrch, newOrch);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        sra.replace(oldOrch, newOrch);
+
+        _rollTo(_qVerifyEnd(0) + 1);
+        sra.submitShares(0);
+        Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(_walletShare(shares, newOrch), 5e17, "share map wallet = the current (replaced-to) wallet");
+        assertEq(_walletShare(shares, oldOrch), 0, "the replaced address receives nothing");
+        assertEq(_sumShares(shares), 1e18);
+    }
+
+    /// After replace, governance correctVolume must address the *new* wallet — the id-keyed model routes it to
+    /// the same identity, so a verification-window correction of the historical quarter hits the right FPV record.
+    function test_Replace_CorrectVolume_NewAddress_CorrectsHistoricalQuarter() public {
+        address oldOrch = makeAddr("cv-old");
+        address newOrch = makeAddr("cv-new");
+        _admit(oldOrch);
+        vm.roll(_qEnd(0) + 1); // q0 posting window
+        _postAs(oldOrch, 0, _fpv(100e18));
+
+        // replace within the verification window, then correct via the NEW address
+        vm.roll(_qPostEnd(0) + 1);
+        vm.prank(owner1);
+        sra.replace(oldOrch, newOrch);
+        vm.prank(owner2);
+        sra.replace(oldOrch, newOrch);
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        sra.replace(oldOrch, newOrch);
+
+        _correctVolume(newOrch, 0, 200e18); // correction via the new wallet hits the same identity
+
+        _rollTo(_qVerifyEnd(0) + 1);
+        sra.submitShares(0);
+        Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 1);
+        assertEq(_walletShare(shares, newOrch), 1e18);
+        // the corrected value (200), not the original post (100), is aggregated
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 200e18);
+    }
 }

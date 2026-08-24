@@ -8,32 +8,43 @@ import {FixedU18} from "./FixedU18.sol";
 // SRA ERC-7201 storage layout (4 namespaces) + precomputed slots, in a shared
 // library so the #5 proxy refactor can use the exact same namespace definitions
 // between proxy and implementation — a single source of truth for the storage layout.
+//
+// Identity model: a uint64 id is the orchestrator identity; an address is only the
+// current effective wallet mapping (activeIdOf). bindings/fpv/freeze history all
+// key on the id, so replace is an O(1) wallet re-point and historical quarter data
+// survives an operator-address change without migration. ids are allocated
+// monotonically and never reused (0 is the unregistered sentinel), so a removed
+// id stays resolvable — a released binding pair is "unclaimed" iff the bound id's
+// admitted flag is false.
 // ----------------------------------------------------------------------------
 
 library SraStorage {
     struct OrchestratorInfo {
-        bool admitted; // admitted
+        address wallet; // current effective wallet (replace updates this; the share map writes this) — 20B
+        bool admitted; // admitted — 1B
         // Frozen-at-E+POST flag: exactly "was this orchestrator frozen at the close of the
         // posting period of the active quarter" — the fpv-effectiveness test. It changes only
         // before E+POST (freeze/unfreeze in the posting window set/clear it); from the
         // verification window onward it is fixed. Contrast frozenSince, which tracks the
         // current freeze state (0 = not frozen) for admission checks and freeze/unfreeze symmetry.
-        bool frozenAtPostEnd;
-        Epoch frozenSince; // current freeze state: 0 = not frozen; > 0 = frozen since this epoch
-        address successor; // binding resolution chain after replace (non-zero = transferred to successor; design-gap completion)
+        bool frozenAtPostEnd; // 1B
+        Epoch frozenSince; // current freeze state: 0 = not frozen; > 0 = frozen since this epoch — 8B
+        // 30B packed into slot0 (successor field removed — the id-keyed model needs no alias chain)
         // Contribution slots (mirror): fpv = active-quarter contribution (0 = not posted),
         // prevFpv = previous-quarter contribution mirror, exclusion-fixed at mirror advance
         // (prevFpv <- frozenAtPostEnd ? 0 : fpv; fpv = 0). submitShares reads fpv for the
         // active quarter (q == activeQ) and prevFpv for the previous one (q == activeQ - 1).
-        FixedU18 fpv;
-        FixedU18 prevFpv;
+        FixedU18 fpv; // slot1
+        FixedU18 prevFpv; // slot2
     }
 
     /// @custom:storage-location erc7201:Solstice.SRA.Registry
     struct SraStorageRegistry {
-        mapping(address orch => OrchestratorInfo) orchestrators;
-        mapping(bytes32 pairId => address orch) bindings; // pairId = keccak256(abi.encode(payer, operator))
-        address[] admittedList; // enumerable admitted (incl. frozen); length doubles as the count
+        mapping(uint64 id => OrchestratorInfo) orchestrators; // id is the identity (monotonic, never reused)
+        mapping(address orch => uint64 id) activeIdOf; // current effective address -> id (0 = unregistered sentinel)
+        mapping(bytes32 pairId => uint64 id) bindings; // pairId = keccak256(abi.encode(payer, operator))
+        uint64 nextId; // id allocator (constructor sets 1; 0 is the unregistered sentinel)
+        uint64[] admittedIds; // enumerable admitted (incl. frozen); length doubles as the count
     }
 
     /// @custom:storage-location erc7201:Solstice.SRA.AdmittedLists
