@@ -230,11 +230,17 @@ contract ServiceRewardsActor is UnanimousGovernance {
     ///      lastSubmittedQ is a q+1 encoding (0 = none), so "awaiting" ⟺ lastSubmittedQ != latest + 1.
     function _pendingSharesQuarter() internal view returns (bool hasPending, uint64 q) {
         SraStorage.SraStorageQuarter storage qt = _quarter();
+        // The latest bound quarter is a *time* property (review S3 root cause): derive it from
+        // the clock via _quarterOf, not from the activeQ cache — the cache advances only on
+        // writes, so a gap quarter (bound but unwritten) would be missed (activeQ still the
+        // previous quarter) and removal would wrongly pass. nowQ > 0 guard mirrors the genesis
+        // case below (q0's verification window: _afterBinding(0) false, nothing bound yet).
+        uint64 nowQ = _quarterOf(currentEpoch());
         uint64 latest;
-        if (_afterBinding(qt.activeQ)) {
-            latest = qt.activeQ;
-        } else if (qt.activeQ > 0) {
-            latest = qt.activeQ - 1;
+        if (_afterBinding(nowQ)) {
+            latest = nowQ;
+        } else if (nowQ > 0) {
+            latest = nowQ - 1;
         } else {
             return (false, 0); // genesis: nothing bound yet
         }
@@ -242,28 +248,54 @@ contract ServiceRewardsActor is UnanimousGovernance {
         return (false, 0);
     }
 
-    /// @dev Mirror advance guard (review B1): a write may target the active quarter (q == activeQ,
-    ///      same-quarter updates) or the next quarter (q == activeQ + 1 — the first write of a new
-    ///      quarter advances the mirror). Anything else is rejected: q < activeQ would rewind the
-    ///      mirror (backing up and clearing a later quarter's contributions — possible when the
-    ///      windows overlap, hence also forbidden at the constructor), and q > activeQ + 1 would
-    ///      skip a quarter, misaligning the prevFpv mirror (it can only hold activeQ - 1's data).
-    ///      The window checks already bound q in a non-overlapping configuration; this guard is
-    ///      defense-in-depth if the deployment parameters ever change.
-    function _assertMirrorWindow(SraStorage.SraStorageQuarter storage qt, uint64 q) internal view {
-        require(q == qt.activeQ || q == qt.activeQ + 1, InvalidParameter());
+    /// @dev Quarter containing `nowE`, derived from the clock alone (review S3 root cause):
+    ///      E(q) = ACTIVATION_EPOCH + q * EPOCHS_PER_QUARTER, so the time quarter is a pure
+    ///      function of the epoch. Unlike the activeQ mirror cache (which advances only on
+    ///      writes), this never lags: a gap quarter with no volume is still a *time* quarter.
+    ///      Pre-activation epochs (possible in test environments; the contract itself starts at
+    ///      ACTIVATION_EPOCH) saturate to quarter 0, matching the initial activeQ = 0.
+    function _quarterOf(Epoch nowE) internal view returns (uint64) {
+        if (Epoch.unwrap(nowE) < Epoch.unwrap(ACTIVATION_EPOCH)) return 0;
+        uint256 offset = uint256(Epoch.unwrap(nowE)) - uint256(Epoch.unwrap(ACTIVATION_EPOCH));
+        return uint64(offset / uint256(Epoch.unwrap(EPOCHS_PER_QUARTER)));
     }
 
-    /// @dev Mirror advance: the first write of a new quarter (postVolume or correctVolume with
-    ///      q != activeQ) backs the active-quarter contributions up into the previous-quarter
-    ///      mirror — exclusion-fixed (frozenAtPostEnd ? 0 : fpv), because the freeze state of the
-    ///      previous quarter's E+POST is no longer derivable once the quarter has advanced — and
-    ///      clears the active slots for the new quarter.
+    /// @dev Time-correct the mirror cache before a write: if the active quarter lags the time
+    ///      quarter (a gap quarter with no writes), advance in one step — gap quarters carry no
+    ///      data, so prevFpv becomes 0 (one-step jump semantics, keeping the prevFpv == activeQ-1
+    ///      invariant). Idempotent when already current. Keeps the slot semantics (fpv/prevFpv
+    ///      ownership) aligned with the clock so no time judgment ever reads a stale cache.
+    function _syncMirror(SraStorage.SraStorageQuarter storage qt) internal {
+        uint64 nowQ = _quarterOf(currentEpoch());
+        if (qt.activeQ < nowQ) _advanceMirror(qt, nowQ);
+    }
+
+    /// @dev Mirror advance guard: writes are forward-only. q < activeQ would rewind the mirror
+    ///      (backing up and clearing a later quarter's contributions — possible when the windows
+    ///      overlap, hence also forbidden at the constructor). q > activeQ (skipping one or more
+    ///      quarters with no writes) is allowed: a quarter with no volume is necessarily unwritten
+    ///      (postVolume rejects zero, review S3), and _advanceMirror jumps in one step, keeping
+    ///      prevFpv = activeQ-1's data (0 for a gap quarter). The window checks bound q above
+    ///      (can't write the far future); this guard only rejects rewinds.
+    function _assertMirrorWindow(SraStorage.SraStorageQuarter storage qt, uint64 q) internal view {
+        require(q >= qt.activeQ, InvalidParameter());
+    }
+
+    /// @dev Mirror advance (review S3): the first write of a new quarter (postVolume or correctVolume
+    ///      with q != activeQ) backs the previous active-quarter contributions up into the previous-
+    ///      quarter mirror — exclusion-fixed (frozenAtPostEnd ? 0 : fpv), because the freeze state
+    ///      of the previous quarter's E+POST is no longer derivable once the quarter has advanced —
+    ///      and clears the active slots for the new quarter. When q skips quarters (q > activeQ + 1,
+    ///      a gap quarter with no volume — necessarily unwritten, postVolume rejects zero), the
+    ///      mirror jumps in one step: quarter q-1 is a gap with no data, so prevFpv is zero; the
+    ///      previous active-quarter data is superseded (that quarter has no legal submission path
+    ///      once the gap quarter has bound — NotLatestQuarter). O(n) per write regardless of gap size.
     function _advanceMirror(SraStorage.SraStorageQuarter storage qt, uint64 q) internal {
         SraStorage.SraStorageRegistry storage r = _registry();
+        bool adjacent = q == qt.activeQ + 1;
         for (uint256 i = 0; i < r.admittedList.length; i++) {
             SraStorage.OrchestratorInfo storage o = r.orchestrators[r.admittedList[i]];
-            o.prevFpv = o.frozenAtPostEnd ? FixedU18.wrap(0) : o.fpv;
+            o.prevFpv = adjacent ? (o.frozenAtPostEnd ? FixedU18.wrap(0) : o.fpv) : FixedU18.wrap(0);
             o.fpv = FixedU18.wrap(0);
             o.frozenAtPostEnd = false; // new quarter: E+POST not reached, nothing frozen yet
         }
@@ -317,9 +349,9 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
 
-        // Mirror advance on the first write of the quarter (q == activeQ afterwards; the
-        // previous quarter's contributions back up into prevFpv, exclusion-fixed). The advance
-        // clears the active slot, so the already-posted check below is against the new quarter.
+        // Time-correct the mirror cache first (a gap quarter advances on the clock, not on writes
+        // — review S3 root cause), then validate the write target against the corrected cache.
+        _syncMirror(qt);
         _assertMirrorWindow(qt, q);
         if (qt.activeQ != q) _advanceMirror(qt, q);
         require(FixedU18.unwrap(o.fpv) == 0, AlreadyPosted(q));
@@ -541,10 +573,11 @@ contract ServiceRewardsActor is UnanimousGovernance {
 
         SraStorage.SraStorageQuarter storage qt = _quarter();
 
-        // Mirror advance on the first write of the quarter — correctVolume can be the first
-        // writer (supplying recomputed figures for a quarter nobody posted). Bounded by the
-        // window guard: q must be the active or the next quarter (rewinding would clear a later
-        // quarter's contributions — review B1).
+        // Time-correct the mirror cache first (gap quarters advance on the clock — review S3
+        // root cause), then validate the write target against the corrected cache. correctVolume
+        // can be the first writer of a quarter (supplying recomputed figures for a quarter nobody
+        // posted); the advance backs the previous quarter's data up into prevFpv.
+        _syncMirror(qt);
         _assertMirrorWindow(qt, q);
         if (qt.activeQ != q) _advanceMirror(qt, q);
 

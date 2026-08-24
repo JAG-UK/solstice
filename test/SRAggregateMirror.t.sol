@@ -350,6 +350,35 @@ contract SRAggregateMirrorTest is SRATestBase {
         assertEq(sra.isAdmitted(b), false, "removed after the pending quarter is cleared");
     }
 
+    /// Review S3 root cause: the remove guard's latest-bound determination is *time-driven* (via
+    /// _quarterOf), not derived from the activeQ cache — the cache advances only on writes, so a
+    /// gap quarter (bound but unwritten) would be missed: q1 bound, nobody wrote, activeQ still 0,
+    /// the cache-based guard wrongly reports latest = 0 (already submitted) and lets removal pass.
+    function test_Remove_PendingShares_GapWindow() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        vm.roll(_qEnd(0) + 1); // Q0 posting window
+        _postAs(a, 0, _fpv(100e18));
+        vm.roll(_qVerifyEnd(0) + 1); // Q0 binds
+        sra.submitShares(0); // lastSubmittedQ = 1
+
+        // Q1 gap: nobody writes (activeQ stays 0). Roll past Q1 binding, before Q2 begins
+        // (E(1)+701; the 100-epoch hold keeps the executing removal at E(1)+801 < E(2)).
+        vm.roll(_qVerifyEnd(1) + 1);
+
+        // Time-derived latest bound = 1 (unsubmitted) -> the execution call reverts.
+        vm.prank(owner1);
+        sra.remove(b); // vote 1 (approve)
+        vm.prank(owner2);
+        sra.remove(b); // vote 2 (approve)
+        vm.roll(block.number + SRA_CANCEL_HOLD);
+        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.PendingShares.selector, 1));
+        sra.remove(b); // permissionless execution: gap-quarter pending -> guard reverts
+    }
+
     /// @dev share of a wallet in the map (0 if absent).
     function _shareOf(Share[] memory shares, address wallet) internal pure returns (uint256) {
         for (uint256 i = 0; i < shares.length; i++) {
@@ -465,5 +494,34 @@ contract SRAggregateMirrorTest is SRATestBase {
         assertEq(shares.length, 1, "removed orchestrator absent from the map");
         assertEq(shares[0].wallet, a, "map = a only");
         assertEq(FixedU18.unwrap(sra.aggregatedFPV(0)), 100e18, "removed FPV excluded -- consistent with map");
+    }
+
+    /// Review S3: a gap quarter (no writes, zero volume) submits as an all-zero no-op — the mirror
+    /// jump keeps prevFpv = 0 for it, so submitShares reads zero and the existing map stands.
+    function test_GapQuarter_SubmitShares_NoOp() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        vm.roll(_qEnd(0) + 1); // Q0 posting window
+        _postAs(a, 0, _fpv(100e18));
+        vm.roll(_qVerifyEnd(0) + 1); // Q0 binds
+        sra.submitShares(0);
+        Share[] memory shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 1, "q0 map = a");
+        assertEq(shares[0].wallet, a);
+
+        // Q1 gap; Q2: b posts (mirror jumps 0 -> 2, prevFpv = 0 for the gap).
+        vm.roll(_qEnd(2) + 1);
+        _postAs(b, 2, _fpv(50e18));
+
+        // Q1 binds with no contribution: submitShares(1) must be an all-zero no-op.
+        vm.roll(_qVerifyEnd(1) + 1);
+        sra.submitShares(1);
+        shares = rewardActor().getShares(SERVICE_STREAM_ID);
+        assertEq(shares.length, 1, "gap quarter no-op leaves the map untouched");
+        assertEq(shares[0].wallet, a, "map still the q0 distribution");
+        assertEq(FixedU18.unwrap(sra.aggregatedFPV(1)), 0, "gap quarter has no contributions");
     }
 }

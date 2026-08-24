@@ -373,28 +373,48 @@ contract SRAAdversarial is SRATestBase {
     /// A write must target the active or the next quarter: skipping a quarter (q > activeQ + 1)
     /// would misalign the prevFpv mirror (it can only hold activeQ - 1's data) — rejected by the
     /// mirror-window guard (review B1).
-    function test_PostVolume_SkipQuarter_Reverts() public {
+    /// Review S3: a write may skip a gap quarter (a quarter with no volume is necessarily
+    /// unwritten — postVolume rejects zero). The mirror jumps in one step, keeping prevFpv =
+    /// activeQ-1's data (0 for a gap). Formerly rejected (deadlock: no way to advance past a
+    /// no-volume quarter).
+    function test_PostVolume_SkipsGapQuarter() public {
         address orch = makeAddr("orch");
         _admit(orch);
 
-        vm.roll(_qEnd(2) + 1); // Q2 posting window; mirror still at genesis activeQ = 0
-        vm.prank(orch);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.postVolume(2, FixedU18.wrap(_fpv(100e18)));
+        vm.roll(_qEnd(2) + 1); // Q2 posting window; Q1 is a gap (no writes)
+        _postAs(orch, 2, _fpv(100e18));
+        assertEq(FixedU18.unwrap(sra.fpvOf(2, orch).usd), 100e18, "gap-skipped write lands in the active slot");
+        assertEq(FixedU18.unwrap(sra.fpvOf(1, orch).usd), 0, "gap quarter has no contribution (prevFpv = 0)");
     }
 
-    /// Same guard on the governance path: CorrectVolume may not target a quarter beyond the next
-    /// one (unanimousNoHold: the second approval executes the body and reverts).
-    function test_CorrectVolume_SkipQuarter_Reverts() public {
+    /// Review S3: the governance path skips gap quarters the same way (CorrectVolume in Q2's
+    /// verification window succeeds; Q1 was unwritten).
+    function test_CorrectVolume_SkipsGapQuarter() public {
         address orch = makeAddr("orch");
         _admit(orch);
 
         vm.roll(_qEnd(2) + POST_PERIOD + 1); // Q2 verification window; activeQ still 0
-        vm.prank(owner1);
-        sra.correctVolume(orch, 2, FixedU18.wrap(_fpv(100e18)));
-        vm.prank(owner2);
-        vm.expectRevert(abi.encodeWithSelector(ServiceRewardsActor.InvalidParameter.selector));
-        sra.correctVolume(orch, 2, FixedU18.wrap(_fpv(100e18)));
+        _correctVolume(orch, 2, _fpv(100e18));
+        assertEq(FixedU18.unwrap(sra.fpvOf(2, orch).usd), 100e18, "governance write skips the gap quarter");
+    }
+
+    /// Review S3 regression: a no-volume quarter must not deadlock the system — q0 has volume,
+    /// q1 is a gap, q2 must still accept writes (previously reverted InvalidParameter forever).
+    function test_GapQuarter_NoDeadlock() public {
+        address a = makeAddr("a");
+        address b = makeAddr("b");
+        _admit(a);
+        _admit(b);
+
+        vm.roll(_qEnd(0) + 1); // Q0 posting window
+        _postAs(a, 0, _fpv(100e18));
+
+        // Q1: nobody writes (all SPs have zero volume) — the gap.
+        vm.roll(_qEnd(2) + 1); // Q2 posting window
+        _postAs(b, 2, _fpv(50e18)); // must succeed (review S3: previously InvalidParameter)
+        assertEq(FixedU18.unwrap(sra.fpvOf(2, b).usd), 50e18, "post-gap write succeeds");
+        assertEq(FixedU18.unwrap(sra.fpvOf(1, a).usd), 0, "gap quarter: prevFpv zero for q0's contributor");
+        assertEq(FixedU18.unwrap(sra.fpvOf(1, b).usd), 0, "gap quarter: prevFpv zero for the new writer too");
     }
 
     function _sumShares(Share[] memory shares) internal pure returns (uint256 sum) {
