@@ -9,7 +9,7 @@ import {FVMRewards} from "./lib/FVMRewards.sol";
 import {PendingOp, Share, WeightRecord, WeightRecordUpdate} from "./lib/FVMRewardTypes.sol";
 import {OwnersLibrary} from "./lib/Owners.sol";
 import {UnanimousGovernance} from "./lib/UnanimousGovernance.sol";
-import {IsASafe} from "./lib/IsASafe.sol";
+import {IsAMultisig} from "./lib/IsAMultisig.sol";
 
 uint64 constant SERVICE_ID = 2;
 
@@ -20,7 +20,7 @@ int256 constant STEP = 5e16; // 5%
 /// @dev Writes require unanimous owner approval, except `cancelPending`/`cancelPendingWeight`
 /// (any single owner, immediate) and `quarterlyGateCheck` (fully permissionless).
 contract StreamWeightActor is UnanimousGovernance {
-    using IsASafe for address;
+    using IsAMultisig for address;
     using OwnersLibrary for address;
 
     IServiceRewardsActor immutable SRA;
@@ -28,12 +28,12 @@ contract StreamWeightActor is UnanimousGovernance {
     Epoch immutable HOLD;
 
     /// @notice Deploys the actor with its two initial owners, bound to a Service Rewards Actor.
-    /// @param owner1 First owner; must be a Safe.
-    /// @param owner2 Second owner; must be a Safe.
+    /// @param owner1 First owner; must be a multisig with more than one signer.
+    /// @param owner2 Second owner; must be a multisig with more than one signer.
     /// @param sra Service Rewards Actor supplying QUARTER/HOLD and gating `quarterlyGateCheck`.
     constructor(address owner1, address owner2, IServiceRewardsActor sra) {
-        owner1.isProbablyASafe();
-        owner2.isProbablyASafe();
+        owner1.requireMultisig();
+        owner2.requireMultisig();
 
         owner1.addOwner();
         owner2.addOwner();
@@ -118,9 +118,9 @@ contract StreamWeightActor is UnanimousGovernance {
 
     /// @notice Replaces one of the two owners.
     /// @param prevOwner Owner being removed.
-    /// @param newOwner Owner being added; must be a Safe.
+    /// @param newOwner Owner being added; must be a multisig with more than one signer.
     function replaceOwner(address prevOwner, address newOwner) external unanimousNoHold(keccak256(msg.data)) {
-        newOwner.isProbablyASafe();
+        newOwner.requireMultisig();
         prevOwner.removeOwner();
         newOwner.addOwner();
     }

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 pragma solidity ^0.8.36;
 
-import {SafeProxy} from "@safe/proxies/SafeProxy.sol";
-
 import {USR_FORBIDDEN, USR_ILLEGAL_ARGUMENT, USR_NOT_FOUND} from "fvm-solidity/FVMErrors.sol";
 
+import {MockMultisig} from "./mocks/MockMultisig.sol";
 import {MockRewardTest} from "./mocks/MockRewardTest.sol";
 import {WAD} from "./mocks/FVMRewardActor.sol";
 import {StreamWeightActor} from "../src/StreamWeightActor.sol";
@@ -12,6 +11,7 @@ import {IServiceRewardsActor} from "../src/interfaces/IServiceRewardsActor.sol";
 import {PendingOp, Share, WeightRecord, WeightRecordUpdate} from "../src/lib/FVMRewardTypes.sol";
 import {Epoch} from "../src/lib/Epoch.sol";
 import {FVMRewards} from "../src/lib/FVMRewards.sol";
+import {IsAMultisig} from "../src/lib/IsAMultisig.sol";
 import {SWA_TIMELOCK} from "../src/lib/FVMRewardMethod.sol";
 
 contract StreamWeightActorTest is MockRewardTest {
@@ -27,8 +27,8 @@ contract StreamWeightActorTest is MockRewardTest {
 
     function setUp() public override {
         super.setUp();
-        owner1 = _makeSafeOwner("owner1");
-        owner2 = _makeSafeOwner("owner2");
+        owner1 = _makeMultisigOwner("owner1");
+        owner2 = _makeMultisigOwner("owner2");
 
         address sra = makeAddr("sra");
         vm.mockCall(
@@ -40,16 +40,9 @@ contract StreamWeightActorTest is MockRewardTest {
         rewardActor().mockSwa(address(actor));
     }
 
-    function _makeSafeOwner(string memory label) internal returns (address proxyAddr) {
-        address masterCopy = makeAddr(string.concat(label, "-mastercopy"));
-        vm.etch(masterCopy, new bytes(8001));
-
-        SafeProxy real = new SafeProxy(masterCopy);
-        bytes memory code = address(real).code;
-
-        proxyAddr = makeAddr(label);
-        vm.etch(proxyAddr, code);
-        vm.store(proxyAddr, bytes32(0), bytes32(uint256(uint160(masterCopy))));
+    function _makeMultisigOwner(string memory label) internal returns (address multisig) {
+        multisig = address(new MockMultisig(2));
+        vm.label(multisig, label);
     }
 
     // -------------------------------------------------------------------------
@@ -285,7 +278,7 @@ contract StreamWeightActorTest is MockRewardTest {
     // -------------------------------------------------------------------------
 
     function test_ReplaceOwner_Success_SwapsApprovalRights() public {
-        address newOwner = _makeSafeOwner("newOwner");
+        address newOwner = _makeMultisigOwner("newOwner");
 
         vm.prank(owner1);
         actor.replaceOwner(owner2, newOwner);
@@ -300,5 +293,31 @@ contract StreamWeightActorTest is MockRewardTest {
         // newOwner was added: recognized immediately.
         vm.prank(newOwner);
         actor.cancelPendingWeight(PendingOp.SET_WEIGHT);
+    }
+
+    // -------------------------------------------------------------------------
+    // Owner must be a multisig
+    // -------------------------------------------------------------------------
+
+    function test_Constructor_EoaOwner_RevertsNotAMultisig() public {
+        address eoa = makeAddr("eoa");
+        vm.expectRevert(abi.encodeWithSelector(IsAMultisig.NotAMultisig.selector, eoa));
+        new StreamWeightActor(owner1, eoa, IServiceRewardsActor(makeAddr("sra")));
+    }
+
+    function test_Constructor_SingleSignerOwner_RevertsTooFewSigners() public {
+        address solo = address(new MockMultisig(1));
+        vm.expectRevert(abi.encodeWithSelector(IsAMultisig.TooFewSigners.selector, solo, uint256(1)));
+        new StreamWeightActor(owner1, solo, IServiceRewardsActor(makeAddr("sra")));
+    }
+
+    function test_ReplaceOwner_EoaOwner_RevertsNotAMultisig() public {
+        address eoa = makeAddr("eoa");
+
+        vm.prank(owner1);
+        actor.replaceOwner(owner2, eoa);
+        vm.prank(owner2);
+        vm.expectRevert(abi.encodeWithSelector(IsAMultisig.NotAMultisig.selector, eoa));
+        actor.replaceOwner(owner2, eoa);
     }
 }
