@@ -21,6 +21,7 @@ import {
 } from "../../src/lib/FVMRewardMethod.sol";
 import {WeightRecord, DistributionKind, Share, PendingOp} from "../../src/lib/FVMRewardTypes.sol";
 import {Epoch} from "../../src/lib/Epoch.sol";
+import {FixedU18} from "../../src/lib/FixedU18.sol";
 
 /// @dev Weights, and per-orchestrator shares, are WAD-scaled: 1e18 == 1.0 == 100%.
 int256 constant WAD = 1e18;
@@ -151,6 +152,11 @@ contract FVMRewardActor {
     /// initializer would never apply); mockInit() sets it after etching.
     uint64 public swaTimelockEpochs;
 
+    /// @notice Test helper flag: when set, SetShares returns USR_FORBIDDEN unconditionally.
+    /// @dev A1 failure-injection switch - triggers the SetSharesFailed revert on the SRA
+    ///      submitShares path. Etched storage starts zeroed, default false, other tests unaffected.
+    bool public failSetShares;
+
     /// @notice Cumulative FIL minted through f02, all streams (T = position 9 / FilMined).
     uint256 public totalMintedReward;
     /// @notice Cumulative burn: w0 residual plus period-fold rounding dust (B).
@@ -200,6 +206,11 @@ contract FVMRewardActor {
 
     function mockSwaTimelockEpochs(uint64 epochs) external {
         swaTimelockEpochs = epochs;
+    }
+
+    /// @notice Test helper: flip the SetShares failure-injection flag (A1).
+    function mockFailSetShares(bool fail) external {
+        failSetShares = fail;
     }
 
     /// @notice Test helper: simulates AwardBlockReward, splitting `br` by clamped weight into a
@@ -339,6 +350,9 @@ contract FVMRewardActor {
     // -------------------------------------------------------------------------
 
     function _setShares(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
+        // A1 failure injection: when the flag is set, reject unconditionally (USR_FORBIDDEN),
+        // exercising the SRA's SetSharesFailed error handling.
+        if (failSetShares) return (USR_FORBIDDEN, 0, "");
         // Params CBOR: [id, [[walletBytes, share]...]]
         (uint64 id, Share[] memory newShares) = _decodeSetSharesParams(params);
         Stream storage s = _streams[id];
@@ -679,7 +693,7 @@ contract FVMRewardActor {
             (wallet, pos) = _decodeAddress(pos);
             uint64 share;
             (share, pos) = _decodeCborUint64(pos);
-            shares[i] = Share({wallet: wallet, share: share});
+            shares[i] = Share({wallet: wallet, share: FixedU18.wrap(share)});
         }
         newPos = pos;
     }
@@ -990,13 +1004,13 @@ contract FVMRewardActor {
         if (shares.length > MAX_RECIPIENTS) return false;
         uint256 total;
         for (uint256 i = 0; i < shares.length; i++) {
-            if (shares[i].share == 0) return false;
+            if (FixedU18.unwrap(shares[i].share) == 0) return false;
             if (shares[i].wallet != BURN_ADDRESS) {
                 for (uint256 j = 0; j < i; j++) {
                     if (shares[j].wallet == shares[i].wallet) return false;
                 }
             }
-            total += shares[i].share;
+            total += FixedU18.unwrap(shares[i].share);
         }
         return total == SHARE_TOTAL;
     }
@@ -1253,14 +1267,14 @@ contract FVMRewardActor {
 
     function _shareOf(Stream storage s, address wallet) internal view returns (uint256) {
         for (uint256 i = 0; i < s.shares.length; i++) {
-            if (s.shares[i].wallet == wallet) return s.shares[i].share;
+            if (s.shares[i].wallet == wallet) return FixedU18.unwrap(s.shares[i].share);
         }
         return 0;
     }
 
     function _storedShareTotal(Stream storage s) internal view returns (uint256 total) {
         for (uint256 i = 0; i < s.shares.length; i++) {
-            total += s.shares[i].share;
+            total += FixedU18.unwrap(s.shares[i].share);
         }
     }
 
@@ -1278,7 +1292,7 @@ contract FVMRewardActor {
         uint256 earnedSum;
         for (uint256 i = 0; i < s.shares.length; i++) {
             address wallet = s.shares[i].wallet;
-            uint256 earned = (s.shares[i].share * pool) / shareTotal;
+            uint256 earned = (FixedU18.unwrap(s.shares[i].share) * pool) / shareTotal;
             earnedSum += earned;
             uint256 claimed = s.claimedPeriod.amount[wallet];
             if (earned > claimed) {

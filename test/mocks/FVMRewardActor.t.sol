@@ -27,6 +27,7 @@ import {CLAIM, SWA_TIMELOCK} from "../../src/lib/FVMRewardMethod.sol";
 import {FVMRewards} from "../../src/lib/FVMRewards.sol";
 import {WeightRecordUpdate} from "../../src/lib/FVMRewardTypes.sol";
 import {Epoch} from "../../src/lib/Epoch.sol";
+import {FixedU18} from "../../src/lib/FixedU18.sol";
 
 /// @dev A distinct external caller, so tests can check authorization by identity rather than
 /// by happenstance of who the test contract is. The typed methods below go through FVMRewards
@@ -192,7 +193,7 @@ contract FVMRewardActorTest is MockRewardTest {
 
     function _shares(address wallet, uint256 amount) internal pure returns (Share[] memory arr) {
         arr = new Share[](1);
-        arr[0] = Share({wallet: wallet, share: amount});
+        arr[0] = Share({wallet: wallet, share: FixedU18.wrap(amount)});
     }
 
     function _wallets(address a) internal pure returns (address[] memory arr) {
@@ -351,10 +352,10 @@ contract FVMRewardActorTest is MockRewardTest {
     function test_RegisterStream_StripsBurnSentinels_AndFloorsSurvivorPool() public {
         uint256 third = SHARE_TOTAL / 3;
         Share[] memory shares_ = new Share[](4);
-        shares_[0] = Share({wallet: RECIPIENT_A, share: third});
-        shares_[1] = Share({wallet: BURN_ADDRESS, share: third});
-        shares_[2] = Share({wallet: RECIPIENT_B, share: third});
-        shares_[3] = Share({wallet: BURN_ADDRESS, share: SHARE_TOTAL - third * 3});
+        shares_[0] = Share({wallet: RECIPIENT_A, share: FixedU18.wrap(third)});
+        shares_[1] = Share({wallet: BURN_ADDRESS, share: FixedU18.wrap(third)});
+        shares_[2] = Share({wallet: RECIPIENT_B, share: FixedU18.wrap(third)});
+        shares_[3] = Share({wallet: BURN_ADDRESS, share: FixedU18.wrap(SHARE_TOTAL - third * 3)});
 
         uint32 exitCode = swaCaller.registerStream(
             SERVICE_ID, _constantRecord(WAD), address(writerCaller), shares_, uint64(block.number) + SWA_TIMELOCK
@@ -365,9 +366,9 @@ contract FVMRewardActorTest is MockRewardTest {
         Share[] memory stored = rewardActor().getShares(SERVICE_ID);
         assertEq(stored.length, 2);
         assertEq(stored[0].wallet, RECIPIENT_A);
-        assertEq(stored[0].share, third);
+        assertEq(FixedU18.unwrap(stored[0].share), third);
         assertEq(stored[1].wallet, RECIPIENT_B);
-        assertEq(stored[1].share, third);
+        assertEq(FixedU18.unwrap(stored[1].share), third);
 
         (uint256 minerPortion, uint256 servicePortion, uint256 burnAmount) = rewardActor().mockAwardBlockReward(2);
         assertEq(minerPortion, 0);
@@ -590,8 +591,8 @@ contract FVMRewardActorTest is MockRewardTest {
     function test_SetShares_ZeroShare_IllegalArgument() public {
         _registerExplicit(SERVICE_ID, address(writerCaller));
         Share[] memory shares_ = new Share[](2);
-        shares_[0] = Share({wallet: RECIPIENT_A, share: SHARE_TOTAL});
-        shares_[1] = Share({wallet: RECIPIENT_B, share: 0});
+        shares_[0] = Share({wallet: RECIPIENT_A, share: FixedU18.wrap(SHARE_TOTAL)});
+        shares_[1] = Share({wallet: RECIPIENT_B, share: FixedU18.wrap(0)});
         assertEq(writerCaller.setShares(SERVICE_ID, shares_), USR_ILLEGAL_ARGUMENT);
     }
 
@@ -600,8 +601,8 @@ contract FVMRewardActorTest is MockRewardTest {
     function test_SetShares_DuplicateRecipient_IllegalArgument() public {
         _registerExplicit(SERVICE_ID, address(writerCaller));
         Share[] memory shares_ = new Share[](2);
-        shares_[0] = Share({wallet: RECIPIENT_A, share: SHARE_TOTAL / 2});
-        shares_[1] = Share({wallet: RECIPIENT_A, share: SHARE_TOTAL / 2});
+        shares_[0] = Share({wallet: RECIPIENT_A, share: FixedU18.wrap(SHARE_TOTAL / 2)});
+        shares_[1] = Share({wallet: RECIPIENT_A, share: FixedU18.wrap(SHARE_TOTAL / 2)});
         assertEq(writerCaller.setShares(SERVICE_ID, shares_), USR_ILLEGAL_ARGUMENT);
     }
 
@@ -610,7 +611,7 @@ contract FVMRewardActorTest is MockRewardTest {
         uint256 n = MAX_RECIPIENTS + 1;
         Share[] memory shares_ = new Share[](n);
         for (uint256 i = 0; i < n; i++) {
-            shares_[i] = Share({wallet: address(uint160(i + 1)), share: SHARE_TOTAL / n});
+            shares_[i] = Share({wallet: address(uint160(i + 1)), share: FixedU18.wrap(SHARE_TOTAL / n)});
         }
         uint32 exitCode = writerCaller.setShares(SERVICE_ID, shares_);
         assertEq(exitCode, USR_ILLEGAL_ARGUMENT);
@@ -626,7 +627,7 @@ contract FVMRewardActorTest is MockRewardTest {
         Share[] memory got = rewardActor().getShares(SERVICE_ID);
         assertEq(got.length, 1);
         assertEq(got[0].wallet, RECIPIENT_A);
-        assertEq(got[0].share, SHARE_TOTAL);
+        assertEq(FixedU18.unwrap(got[0].share), SHARE_TOTAL);
     }
 
     function test_SetShares_FoldsAccruedIntoPayable_AndBurnsResidue() public {
@@ -655,9 +656,9 @@ contract FVMRewardActorTest is MockRewardTest {
         _registerExplicit(SERVICE_ID, address(writerCaller)); // weight 0.1e18
 
         Share[] memory partialBurn = new Share[](3);
-        partialBurn[0] = Share({wallet: RECIPIENT_A, share: SHARE_TOTAL / 4});
-        partialBurn[1] = Share({wallet: BURN_ADDRESS, share: SHARE_TOTAL / 2});
-        partialBurn[2] = Share({wallet: RECIPIENT_B, share: SHARE_TOTAL / 4});
+        partialBurn[0] = Share({wallet: RECIPIENT_A, share: FixedU18.wrap(SHARE_TOTAL / 4)});
+        partialBurn[1] = Share({wallet: BURN_ADDRESS, share: FixedU18.wrap(SHARE_TOTAL / 2)});
+        partialBurn[2] = Share({wallet: RECIPIENT_B, share: FixedU18.wrap(SHARE_TOTAL / 4)});
         assertEq(writerCaller.setShares(SERVICE_ID, partialBurn), 0);
 
         Share[] memory stored = rewardActor().getShares(SERVICE_ID);
@@ -1115,8 +1116,8 @@ contract FVMRewardActorTest is MockRewardTest {
     function test_Claim_MultipleWallets_ReturnsAmountsInOrder() public {
         _registerExplicit(SERVICE_ID, address(writerCaller)); // weight 0.1e18
         Share[] memory shares_ = new Share[](2);
-        shares_[0] = Share({wallet: RECIPIENT_A, share: 0.6e18});
-        shares_[1] = Share({wallet: RECIPIENT_B, share: 0.4e18});
+        shares_[0] = Share({wallet: RECIPIENT_A, share: FixedU18.wrap(0.6e18)});
+        shares_[1] = Share({wallet: RECIPIENT_B, share: FixedU18.wrap(0.4e18)});
         uint32 setSharesExit = writerCaller.setShares(SERVICE_ID, shares_);
         assertEq(setSharesExit, 0);
 
@@ -1246,8 +1247,7 @@ contract FVMRewardActorTest is MockRewardTest {
     // Regression: FVMCallActorByIdWithReward must not break existing actor mocks
     // -------------------------------------------------------------------------
 
-    // Exercises _handleBurn's balance debit through the new dispatcher -- would break if the
-    // forward to FVMCallActorById used `call` instead of `delegatecall`.
+    // Exercises _handleBurn's balance debit through the new dispatcher (delegatecall keeps the caller's balance context).
     function test_Regression_Burn_StillDebitsCallerBalance() public {
         uint256 before = address(this).balance;
         assertEq(BURN_ADDRESS.balance, 0);
