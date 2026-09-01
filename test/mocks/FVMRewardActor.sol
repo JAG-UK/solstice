@@ -6,6 +6,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {USR_FORBIDDEN, USR_ILLEGAL_ARGUMENT, USR_NOT_FOUND, USR_UNHANDLED_MESSAGE} from "fvm-solidity/FVMErrors.sol";
 import {CBOR_CODEC} from "fvm-solidity/FVMCodec.sol";
 import {FVMPay} from "fvm-solidity/FVMPay.sol";
+import {BURN_ADDRESS} from "fvm-solidity/FVMActors.sol";
 
 import {
     SET_WEIGHT_RECORDS,
@@ -20,6 +21,7 @@ import {
 } from "../../src/lib/FVMRewardMethod.sol";
 import {WeightRecord, DistributionKind, Share, PendingOp} from "../../src/lib/FVMRewardTypes.sol";
 import {Epoch} from "../../src/lib/Epoch.sol";
+import {FixedU18} from "../../src/lib/FixedU18.sol";
 
 /// @dev Weights, and per-orchestrator shares, are WAD-scaled: 1e18 == 1.0 == 100%.
 int256 constant WAD = 1e18;
@@ -150,6 +152,11 @@ contract FVMRewardActor {
     /// initializer would never apply); mockInit() sets it after etching.
     uint64 public swaTimelockEpochs;
 
+    /// @notice Test helper flag: when set, SetShares returns USR_FORBIDDEN unconditionally.
+    /// @dev A1 failure-injection switch - triggers the SetSharesFailed revert on the SRA
+    ///      submitShares path. Etched storage starts zeroed, default false, other tests unaffected.
+    bool public failSetShares;
+
     /// @notice Cumulative FIL minted through f02, all streams (T = position 9 / FilMined).
     uint256 public totalMintedReward;
     /// @notice Cumulative burn: w0 residual plus period-fold rounding dust (B).
@@ -201,6 +208,11 @@ contract FVMRewardActor {
         swaTimelockEpochs = epochs;
     }
 
+    /// @notice Test helper: flip the SetShares failure-injection flag (A1).
+    function mockFailSetShares(bool fail) external {
+        failSetShares = fail;
+    }
+
     /// @notice Test helper: simulates AwardBlockReward, splitting `br` by clamped weight into a
     /// miner portion (IMPLICIT; the actual payout is the unmocked ApplyRewards path), a service
     /// portion (EXPLICIT, accrues for Claim/SetShares), and a burn residual.
@@ -221,8 +233,10 @@ contract FVMRewardActor {
             if (s.kind == DistributionKind.IMPLICIT) {
                 minerPortion += amount;
             } else {
-                servicePortion += amount;
-                s.accrued += amount;
+                uint256 storedShareTotal = _storedShareTotal(s);
+                uint256 accrued = storedShareTotal == SHARE_TOTAL ? amount : (amount * storedShareTotal) / SHARE_TOTAL;
+                servicePortion += accrued;
+                s.accrued += accrued;
             }
         }
         burnAmount = br - minerPortion - servicePortion;
@@ -336,6 +350,9 @@ contract FVMRewardActor {
     // -------------------------------------------------------------------------
 
     function _setShares(bytes calldata params) internal returns (uint32, uint64, bytes memory) {
+        // A1 failure injection: when the flag is set, reject unconditionally (USR_FORBIDDEN),
+        // exercising the SRA's SetSharesFailed error handling.
+        if (failSetShares) return (USR_FORBIDDEN, 0, "");
         // Params CBOR: [id, [[walletBytes, share]...]]
         (uint64 id, Share[] memory newShares) = _decodeSetSharesParams(params);
         Stream storage s = _streams[id];
@@ -347,9 +364,7 @@ contract FVMRewardActor {
         _foldAndBurnResidue(s);
 
         delete s.shares;
-        for (uint256 i = 0; i < newShares.length; i++) {
-            s.shares.push(newShares[i]);
-        }
+        _pushNonBurnShares(s.shares, newShares);
         return (0, 0, "");
     }
 
@@ -469,9 +484,7 @@ contract FVMRewardActor {
         if (!_admits(proposed)) return (USR_ILLEGAL_ARGUMENT, 0, "");
 
         delete _pendingShares[id];
-        for (uint256 i = 0; i < shares.length; i++) {
-            _pendingShares[id].push(shares[i]);
-        }
+        _pushNonBurnShares(_pendingShares[id], shares);
         _queueWrite(
             id,
             PendingOp.REGISTER,
@@ -600,6 +613,9 @@ contract FVMRewardActor {
             if (s.kind != DistributionKind.EXPLICIT) return (USR_ILLEGAL_ARGUMENT, 0, "");
         }
 
+        uint256 storedShareTotal;
+        if (!tombstoned) storedShareTotal = _storedShareTotal(s);
+
         uint256[] memory amounts = new uint256[](wallets.length);
         for (uint256 i = 0; i < wallets.length; i++) {
             address wallet = wallets[i];
@@ -615,7 +631,7 @@ contract FVMRewardActor {
             } else {
                 uint256 share = _shareOf(s, wallet);
                 uint256 claimed = s.claimedPeriod.amount[wallet];
-                uint256 grossLive = (share * s.accrued) / SHARE_TOTAL;
+                uint256 grossLive = storedShareTotal == 0 ? 0 : (share * s.accrued) / storedShareTotal;
                 uint256 live = grossLive > claimed ? grossLive - claimed : 0;
                 uint256 payableAmount = s.payableLedger.amount[wallet];
                 entitlement = live + payableAmount;
@@ -677,7 +693,7 @@ contract FVMRewardActor {
             (wallet, pos) = _decodeAddress(pos);
             uint64 share;
             (share, pos) = _decodeCborUint64(pos);
-            shares[i] = Share({wallet: wallet, share: share});
+            shares[i] = Share({wallet: wallet, share: FixedU18.wrap(share)});
         }
         newPos = pos;
     }
@@ -983,16 +999,18 @@ contract FVMRewardActor {
     /// @dev validate_weight_record: floor <= v_start <= cap <= DENOM. The lower bound on floor
     /// is implicit in f02, where these three are u64; here they are signed and it is not.
     /// @dev validate_shares: at most MAX_RECIPIENTS rows, every share nonzero, no repeated
-    /// recipient, and the whole map summing to one.
+    /// payee, and the whole wire map summing to one. Repeated burn instructions are equivalent.
     function _sharesValid(Share[] memory shares) internal pure returns (bool) {
         if (shares.length > MAX_RECIPIENTS) return false;
         uint256 total;
         for (uint256 i = 0; i < shares.length; i++) {
-            if (shares[i].share == 0) return false;
-            for (uint256 j = 0; j < i; j++) {
-                if (shares[j].wallet == shares[i].wallet) return false;
+            if (FixedU18.unwrap(shares[i].share) == 0) return false;
+            if (shares[i].wallet != BURN_ADDRESS) {
+                for (uint256 j = 0; j < i; j++) {
+                    if (shares[j].wallet == shares[i].wallet) return false;
+                }
             }
-            total += shares[i].share;
+            total += FixedU18.unwrap(shares[i].share);
         }
         return total == SHARE_TOTAL;
     }
@@ -1249,19 +1267,32 @@ contract FVMRewardActor {
 
     function _shareOf(Stream storage s, address wallet) internal view returns (uint256) {
         for (uint256 i = 0; i < s.shares.length; i++) {
-            if (s.shares[i].wallet == wallet) return s.shares[i].share;
+            if (s.shares[i].wallet == wallet) return FixedU18.unwrap(s.shares[i].share);
         }
         return 0;
+    }
+
+    function _storedShareTotal(Stream storage s) internal view returns (uint256 total) {
+        for (uint256 i = 0; i < s.shares.length; i++) {
+            total += FixedU18.unwrap(s.shares[i].share);
+        }
+    }
+
+    function _pushNonBurnShares(Share[] storage target, Share[] memory shares) internal {
+        for (uint256 i = 0; i < shares.length; i++) {
+            if (shares[i].wallet != BURN_ADDRESS) target.push(shares[i]);
+        }
     }
 
     /// @dev Closes out the current period: each recipient's earned-minus-claimed amount moves
     /// into `payable` under the OLD map, the rounding residue burns, and accrual state resets.
     function _foldAndBurnResidue(Stream storage s) internal {
         uint256 pool = s.accrued;
+        uint256 shareTotal = _storedShareTotal(s);
         uint256 earnedSum;
         for (uint256 i = 0; i < s.shares.length; i++) {
             address wallet = s.shares[i].wallet;
-            uint256 earned = (s.shares[i].share * pool) / SHARE_TOTAL;
+            uint256 earned = (FixedU18.unwrap(s.shares[i].share) * pool) / shareTotal;
             earnedSum += earned;
             uint256 claimed = s.claimedPeriod.amount[wallet];
             if (earned > claimed) {

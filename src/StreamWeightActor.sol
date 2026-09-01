@@ -6,11 +6,9 @@ import {Epoch} from "./lib/Epoch.sol";
 import {FixedU18} from "./lib/FixedU18.sol";
 import {GateParams, GateParamsLibrary} from "./lib/GateParams.sol";
 import {FVMRewards} from "./lib/FVMRewards.sol";
-import {PendingOp, Share, WeightRecord, WeightRecordUpdate} from "./lib/FVMRewardTypes.sol";
+import {PendingOp, SERVICE_ID, Share, WeightRecord, WeightRecordUpdate} from "./lib/FVMRewardTypes.sol";
 import {OwnersLibrary} from "./lib/Owners.sol";
 import {UnanimousGovernance} from "./lib/UnanimousGovernance.sol";
-
-uint64 constant SERVICE_ID = 2;
 
 int256 constant STEP = 5e16; // 5%
 
@@ -123,8 +121,8 @@ contract StreamWeightActor is UnanimousGovernance {
     error StepsComplete();
 
     /// @notice Advances the quarterly gate by one quarter, stepping SERVICE_ID's weight schedule
-    /// if the elapsed quarter's aggregated FPV cleared the next volume threshold.
-    /// @dev Permissionless; reverts via the SRA if the quarter's FPV is not yet bound.
+    /// if the elapsed quarter's aggregated FilecoinPayVolume cleared the next volume threshold.
+    /// @dev Permissionless; reverts via the SRA if the quarter's FilecoinPayVolume is not yet bound.
     function quarterlyGateCheck() external {
         GateParamsLibrary.GateParamsInfo storage gateParamsInfo = GateParamsLibrary.getGateParamsSlot();
         GateParams memory loaded = gateParamsInfo.params;
@@ -132,7 +130,7 @@ contract StreamWeightActor is UnanimousGovernance {
 
         uint64 quarter = ++gateParamsInfo.lastCheckedQuarter;
         // NOTE this will enforce afterBinding()
-        FixedU18 fpv = SRA.aggregatedFPV(quarter);
+        FixedU18 fpv = SRA.aggregatedFilecoinPayVolume(quarter);
 
         if (fpv >= loaded.nextThreshold()) {
             int256 next = (int256(uint256(loaded.steps)) + 3) * STEP;

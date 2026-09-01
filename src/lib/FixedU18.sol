@@ -8,6 +8,7 @@ using {
     unsafeSub as -,
     unsafeMulDown as *,
     divDown as /,
+    mod as %,
     equals as ==,
     greaterThan as >,
     lessThan as <,
@@ -19,6 +20,7 @@ using FixedU18Library for FixedU18 global;
 
 uint256 constant ONE_WAD = 1 ether;
 FixedU18 constant ONE = FixedU18.wrap(ONE_WAD);
+FixedU18 constant ZERO = FixedU18.wrap(0);
 
 // type(uint256).max / ONE_WAD
 uint256 constant MAX_DIVIDEND_WAD = 115792089237316195423570985008687907853269984665640564039457;
@@ -36,6 +38,18 @@ function divDown(FixedU18 dividend, FixedU18 divisor) pure returns (FixedU18 quo
             revert(28, 36)
         }
         quotient := div(mul(dividend, ONE_WAD), divisor)
+    }
+}
+
+// @dev returns zero if divisor is zero
+function mod(FixedU18 dividend, FixedU18 divisor) pure returns (FixedU18 remainder) {
+    assembly ("memory-safe") {
+        if gt(dividend, MAX_DIVIDEND_WAD) {
+            mstore(0, DIVIDEND_TOO_LARGE_SELECTOR)
+            mstore(32, dividend)
+            revert(28, 36)
+        }
+        remainder := mod(mul(dividend, ONE_WAD), divisor)
     }
 }
 

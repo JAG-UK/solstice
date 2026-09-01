@@ -1,0 +1,38 @@
+name: Halmos
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  halmos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+          cache: true
+
+      - name: Set up Python
+        # halmos 0.1.x requires 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          forge install
+
+      - name: Install halmos
+        run: |
+          pip install halmos==0.1.13
+
+      - name: Run symbolic verification
+        run: |
+          halmos --contract QuarterWindowCheck --no-test-constructor

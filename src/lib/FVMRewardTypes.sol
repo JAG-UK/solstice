@@ -2,6 +2,10 @@
 pragma solidity ^0.8.36;
 
 import {Epoch} from "./Epoch.sol";
+import {FixedU18} from "./FixedU18.sol";
+
+// f02's service stream fixed id — the f02 migration pins consensus = 1 and service = 2.
+uint64 constant SERVICE_ID = 2;
 
 /// @notice A stream's Distribution kind (FIP-0118 Section 2.4).
 /// @dev IMPLICIT streams store no writer (f02 resolves the recipient from protocol state).
@@ -34,7 +38,7 @@ struct WeightRecordUpdate {
 ///      therefore fit uint64.
 struct Share {
     address wallet;
-    uint256 share;
+    FixedU18 share;
 }
 
 /// @notice The kinds of queueable SWA discretionary writes a pending slot may hold.
